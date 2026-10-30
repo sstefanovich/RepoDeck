@@ -1,0 +1,14 @@
+{
+  "name": "repodeck",
+  "version": "0.1.0",
+  "description": "A friendly Git GUI for working on several repos at once",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "node launch.js",
+    "check": "node --check main.js && node --check preload.js && node --check src/git.js && node --check renderer/app.js"
+  },
+  "devDependencies": {
+    "electron": "^45.2.0"
+  }
+}

@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:">
+  <title>RepoDeck</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <div class="brand">
+        <span class="logo">⎇</span>
+        <span>RepoDeck</span>
+      </div>
+      <div id="ws-list" class="ws-list"></div>
+      <div class="sidebar-foot">
+        <button class="btn ghost block" data-action="new-ws">＋ New workspace</button>
+        <button class="btn ghost block" data-action="clone">⤓ Clone a repo…</button>
+        <div class="foot-row">
+          <button class="btn ghost" data-action="settings">⚙ Settings</button>
+          <button class="btn ghost" data-action="help">? Git explained</button>
+        </div>
+      </div>
+    </aside>
+    <main id="main">
+      <div id="view" class="view"></div>
+      <div id="log" class="log">
+        <button class="log-head" data-action="toggle-log">
+          <span class="log-caret">▸</span>
+          <span>Behind the scenes — the git commands this app runs for you</span>
+          <span id="log-count" class="count"></span>
+        </button>
+        <div id="log-body" class="log-body"></div>
+      </div>
+    </main>
+  </div>
+  <div id="modal-root"></div>
+  <div id="toast-root"></div>
+  <script src="app.js"></script>
+</body>
+</html>
