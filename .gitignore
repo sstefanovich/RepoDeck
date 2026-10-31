@@ -2,3 +2,4 @@
 out/
 dist/
 *.log
+.demo/

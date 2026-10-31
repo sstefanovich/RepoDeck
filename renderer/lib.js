@@ -1,0 +1,364 @@
+// Pure helpers shared by the UI (no DOM, no app state), so they can be unit tested.
+// Loaded as a plain script before app.js; also exported for Node when 'module' exists.
+'use strict';
+
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+
+const basename = (p) => p.split(/[\\/]/).filter(Boolean).pop() || p;
+
+const norm = (p) => p.toLowerCase().replace(/[\\/]+$/, '');
+
+const samePath = (a, b) => !!a && !!b && norm(a) === norm(b);
+
+const plural = (n, one, many = one + 's') => `${n} ${n === 1 ? one : many}`;
+
+function timeAgo(unixSec) {
+  const s = Math.max(0, Date.now() / 1000 - unixSec);
+  const steps = [[60, 'second', 1], [3600, 'minute', 60], [86400, 'hour', 3600], [86400 * 30, 'day', 86400], [86400 * 365, 'month', 86400 * 30], [Infinity, 'year', 86400 * 365]];
+  for (const [limit, unit, div] of steps) {
+    if (s < limit) { const n = Math.floor(s / div); return n <= 0 || unit === 'second' ? 'just now' : `${plural(n, unit)} ago`; }
+  }
+  return '';
+}
+
+function parseConflicts(text) {
+  const eol = text.includes('\r\n') ? '\r\n' : '\n';
+  const segs = [];
+  let cur = { type: 'text', lines: [] };
+  let mode = 'text';
+  for (const line of text.split(/\r?\n/)) {
+    if (mode === 'text' && line.startsWith('<<<<<<<')) {
+      segs.push(cur);
+      cur = { type: 'conflict', ours: [], base: [], theirs: [], markers: { start: line } };
+      mode = 'ours';
+    } else if (mode === 'ours' && line.startsWith('|||||||')) { mode = 'base'; cur.markers.base = line; }
+    else if ((mode === 'ours' || mode === 'base') && line.startsWith('=======')) { mode = 'theirs'; cur.markers.sep = line; }
+    else if (mode === 'theirs' && line.startsWith('>>>>>>>')) {
+      cur.markers.end = line;
+      segs.push(cur);
+      cur = { type: 'text', lines: [] };
+      mode = 'text';
+    } else if (mode === 'text') cur.lines.push(line);
+    else cur[mode].push(line);
+  }
+  if (mode !== 'text') return null; // unbalanced markers â€” let the user use their editor
+  segs.push(cur);
+  return { segs, eol, count: segs.filter((s) => s.type === 'conflict').length };
+}
+
+function pickLines(seg, choice, custom) {
+  switch (choice) {
+    case 'ours': return seg.ours;
+    case 'theirs': return seg.theirs;
+    case 'both': return [...seg.ours, ...seg.theirs];
+    case 'both-rev': return [...seg.theirs, ...seg.ours];
+    case 'edit': return (custom ?? [...seg.ours, ...seg.theirs].join('\n')).split(/\r?\n/);
+    default: return null;
+  }
+}
+
+// ---------- line diff (Myers) for the side-by-side comparer ----------
+function myers(A, B) {
+  const N = A.length;
+  const M = B.length;
+  const allChanged = () => [...A.map((_, i) => ['-', i, null]), ...B.map((_, j) => ['+', null, j])];
+  if (!N || !M) return allChanged();
+  const max = N + M;
+  const off = max + 1;
+  const v = new Int32Array(2 * max + 3);
+  const trace = [];
+  const limit = Math.max(50, Math.floor(2e7 / v.length)); // keep memory bounded on huge, very different files
+  let done = false;
+  for (let d = 0; d <= max && !done; d++) {
+    if (d > limit) return allChanged();
+    trace.push(v.slice());
+    for (let k = -d; k <= d; k += 2) {
+      let x = k === -d || (k !== d && v[off + k - 1] < v[off + k + 1]) ? v[off + k + 1] : v[off + k - 1] + 1;
+      let y = x - k;
+      while (x < N && y < M && A[x] === B[y]) { x++; y++; }
+      v[off + k] = x;
+      if (x >= N && y >= M) { done = true; break; }
+    }
+  }
+  const res = [];
+  let x = N;
+  let y = M;
+  for (let d = trace.length - 1; d >= 0; d--) {
+    const vv = trace[d];
+    const k = x - y;
+    const prevK = k === -d || (k !== d && vv[off + k - 1] < vv[off + k + 1]) ? k + 1 : k - 1;
+    const prevX = vv[off + prevK];
+    const prevY = prevX - prevK;
+    while (x > prevX && y > prevY) { res.push(['=', x - 1, y - 1]); x--; y--; }
+    if (d > 0) res.push(x === prevX ? ['+', null, y - 1] : ['-', x - 1, null]);
+    x = prevX;
+    y = prevY;
+  }
+  return res.reverse();
+}
+
+function diffLines(a, b) {
+  let pre = 0;
+  while (pre < a.length && pre < b.length && a[pre] === b[pre]) pre++;
+  let ea = a.length;
+  let eb = b.length;
+  while (ea > pre && eb > pre && a[ea - 1] === b[eb - 1]) { ea--; eb--; }
+  const out = [];
+  for (let i = 0; i < pre; i++) out.push(['=', i, i]);
+  for (const [op, i, j] of myers(a.slice(pre, ea), b.slice(pre, eb))) out.push([op, i == null ? null : i + pre, j == null ? null : j + pre]);
+  for (let i = ea, j = eb; i < a.length; i++, j++) out.push(['=', i, j]);
+  return out;
+}
+
+// Pairs up removed/added lines so changed lines sit next to each other.
+function sideBySide(a, b) {
+  const rows = [];
+  let dels = [];
+  let adds = [];
+  const flush = () => {
+    for (let k = 0; k < Math.max(dels.length, adds.length); k++) {
+      const li = dels[k] ?? null;
+      const ri = adds[k] ?? null;
+      rows.push({ kind: li != null && ri != null ? 'chg' : li != null ? 'del' : 'add', li, ri, l: li != null ? a[li] : null, r: ri != null ? b[ri] : null });
+    }
+    dels = [];
+    adds = [];
+  };
+  for (const [op, i, j] of diffLines(a, b)) {
+    if (op === '=') { flush(); rows.push({ kind: 'same', li: i, ri: j, l: a[i], r: b[j] }); }
+    else if (op === '-') dels.push(i);
+    else adds.push(j);
+  }
+  flush();
+  return rows;
+}
+
+function inlineDiff(a, b) {
+  let p = 0;
+  while (p < a.length && p < b.length && a[p] === b[p]) p++;
+  let s = 0;
+  while (s < a.length - p && s < b.length - p && a[a.length - 1 - s] === b[b.length - 1 - s]) s++;
+  const mark = (x) => `${esc(x.slice(0, p))}<mark>${esc(x.slice(p, x.length - s))}</mark>${esc(x.slice(x.length - s))}`;
+  return [mark(a), mark(b)];
+}
+
+const toLines = (text) => { const l = text.split(/\r?\n/); if (l[l.length - 1] === '') l.pop(); return l; };
+
+// Small, safe markdown: code blocks, inline code, bold, headings, lists, links shown as text.
+function md(text) {
+  const out = [];
+  const parts = text.split(/```[^\n]*\n?/);
+  parts.forEach((part, idx) => {
+    if (idx % 2 === 1) { out.push(`<pre class="cp-code">${esc(part.replace(/\n$/, ''))}</pre>`); return; }
+    const inline = (s) => esc(s).replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
+    let list = null;
+    const flush = () => { if (list) { out.push(`<${list.tag}>${list.items.map((x) => `<li>${x}</li>`).join('')}</${list.tag}>`); list = null; } };
+    for (const line of part.split('\n')) {
+      const ul = line.match(/^\s*[-*]\s+(.*)/);
+      const ol = line.match(/^\s*\d+[.)]\s+(.*)/);
+      const h = line.match(/^#{1,4}\s+(.*)/);
+      if (ul || ol) {
+        const tag = ul ? 'ul' : 'ol';
+        if (!list || list.tag !== tag) { flush(); list = { tag, items: [] }; }
+        list.items.push(inline((ul || ol)[1]));
+      } else {
+        flush();
+        if (h) out.push(`<div class="cp-h">${inline(h[1])}</div>`);
+        else if (line.trim()) out.push(`<p>${inline(line)}</p>`);
+      }
+    }
+    flush();
+  });
+  return out.join('');
+}
+
+// ---------- syntax highlighting (small, regex-based) ----------
+const LANG_BY_EXT = {
+  js: 'c', jsx: 'c', ts: 'c', tsx: 'c', mjs: 'c', cjs: 'c', cs: 'c', java: 'c', kt: 'c', go: 'c', rs: 'c', c: 'c', h: 'c', cpp: 'c', hpp: 'c',
+  swift: 'c', php: 'c', scala: 'c', dart: 'c', css: 'css', scss: 'css', less: 'css', json: 'json', py: 'hash', rb: 'hash', sh: 'hash',
+  bash: 'hash', ps1: 'hash', psm1: 'hash', yml: 'hash', yaml: 'hash', toml: 'hash', ini: 'hash', dockerfile: 'hash', r: 'hash',
+  html: 'markup', htm: 'markup', xml: 'markup', svg: 'markup', vue: 'markup', xaml: 'markup', csproj: 'markup', config: 'markup', razor: 'markup', cshtml: 'markup',
+  sql: 'sql', md: null,
+};
+const KEYWORDS = new Set(('abstract async await break case catch class const continue default def defer delete do elif else enum export extends false final finally fn for foreach from func function get go if impl import in instanceof interface internal is let lambda match module mut namespace new nil none null override package pass private protected pub public raise readonly return select self set static struct super switch then this throw throws trait true try type typeof undefined unless until use using var void when where while with yield '
+  + 'and as begin by create delete desc distinct drop end exists from group having insert into join left limit not on or order right table union update values view').split(' '));
+const LANG_RE = {
+  c: /(\/\/.*$|\/\*.*?(?:\*\/|$))|("(?:[^"\\]|\\.)*"?|'(?:[^'\\]|\\.)*'?|`(?:[^`\\]|\\.)*`?)|(\b\d[\d_.xXa-fA-F]*\b)|(\b[A-Za-z_$][\w$]*\b)/g,
+  hash: /(#.*$)|("(?:[^"\\]|\\.)*"?|'(?:[^'\\]|\\.)*'?)|(\b\d[\d_.]*\b)|(\b[A-Za-z_][\w-]*\b)/g,
+  css: /(\/\*.*?(?:\*\/|$))|("[^"]*"?|'[^']*'?)|(#[0-9a-fA-F]{3,8}\b|\b\d[\d.]*(?:px|em|rem|%|s|ms|vh|vw|deg)?\b)|([\w-]+(?=\s*:))/g,
+  json: /()("(?:[^"\\]|\\.)*"?)|(-?\b\d[\d.eE+-]*\b)|(\b(?:true|false|null)\b)/g,
+  sql: /(--.*$)|('(?:[^']|'')*'?)|(\b\d[\d.]*\b)|(\b[A-Za-z_]\w*\b)/gi,
+  markup: /(<!--.*?(?:-->|$))|("[^"]*"?|'[^']*'?)|()(<\/?[\w:.-]+|\/?>)/g,
+};
+
+function langOf(file) {
+  const name = String(file || '').split(/[\\/]/).pop().toLowerCase();
+  if (name === 'dockerfile') return 'hash';
+  return LANG_BY_EXT[name.includes('.') ? name.split('.').pop() : ''] || null;
+}
+
+// Splits a line into [{ t: text, c: class|null }] covering the whole line.
+function tokenize(line, lang) {
+  const re = LANG_RE[lang];
+  if (!re) return [{ t: line, c: null }];
+  re.lastIndex = 0;
+  const out = [];
+  let pos = 0;
+  let m;
+  while ((m = re.exec(line))) {
+    if (m[0] === '') { re.lastIndex++; continue; }
+    if (m.index > pos) out.push({ t: line.slice(pos, m.index), c: null });
+    let c = m[1] ? 'com' : m[2] ? 'str' : m[3] ? 'num' : null;
+    if (!c && m[4]) {
+      if (lang === 'json') c = 'kw';
+      else if (lang === 'css') c = 'prop';
+      else if (lang === 'markup') c = 'tag';
+      else if (KEYWORDS.has(lang === 'sql' ? m[4].toLowerCase() : m[4])) c = 'kw';
+    }
+    out.push({ t: m[0], c });
+    pos = m.index + m[0].length;
+  }
+  if (pos < line.length) out.push({ t: line.slice(pos), c: null });
+  return out;
+}
+
+// HTML for one line: syntax colours, plus <mark> around the [start, end) range that changed.
+function highlight(text, lang, mark) {
+  let html = '';
+  let pos = 0;
+  for (const s of tokenize(text, lang)) {
+    const start = pos;
+    const end = pos + s.t.length;
+    pos = end;
+    const pieces = mark && mark[1] > mark[0] && mark[0] < end && mark[1] > start
+      ? [[s.t.slice(0, Math.max(start, mark[0]) - start), false], [s.t.slice(Math.max(start, mark[0]) - start, Math.min(end, mark[1]) - start), true], [s.t.slice(Math.min(end, mark[1]) - start), false]]
+      : [[s.t, false]];
+    for (const [t, m] of pieces) {
+      if (!t) continue;
+      let h = esc(t);
+      if (s.c) h = `<span class="hl-${s.c}">${h}</span>`;
+      if (m) h = `<mark>${h}</mark>`;
+      html += h;
+    }
+  }
+  return html;
+}
+
+// The part of a changed line that differs: common prefix/suffix are left unmarked.
+function changeRange(a, b) {
+  let p = 0;
+  while (p < a.length && p < b.length && a[p] === b[p]) p++;
+  let s = 0;
+  while (s < a.length - p && s < b.length - p && a[a.length - 1 - s] === b[b.length - 1 - s]) s++;
+  return { a: [p, a.length - s], b: [p, b.length - s] };
+}
+
+// ---------- unified diff parsing ----------
+// -> [{ name, notes: [], hunks: [{ ctx, rows: [{ kind: 'ctx'|'add'|'del', o, n, text }] }] }]
+function parseUnified(text) {
+  const files = [];
+  let file = null;
+  let hunk = null;
+  let inHeader = false;
+  let o = 0;
+  let n = 0;
+  const ensureFile = () => { if (!file) { file = { name: '', notes: [], hunks: [] }; files.push(file); } };
+  for (const raw of String(text || '').split('\n')) {
+    const line = raw.replace(/\r$/, '');
+    if (line.startsWith('diff --git ')) {
+      const m = line.match(/ b\/(.*)$/);
+      file = { name: m ? m[1] : line, notes: [], hunks: [] };
+      files.push(file);
+      hunk = null;
+      inHeader = true;
+      continue;
+    }
+    if (inHeader && !line.startsWith('@@')) {
+      if (line.startsWith('Binary files')) file.notes.push('Binary file changed');
+      else if (line.startsWith('rename from ')) file.notes.push(`Renamed from ${line.slice(12)}`);
+      else if (line.startsWith('new file mode')) file.notes.push('New file');
+      else if (line.startsWith('deleted file mode')) file.notes.push('File deleted');
+      continue;
+    }
+    if (line.startsWith('@@')) {
+      ensureFile();
+      inHeader = false;
+      const m = line.match(/@@ -(\d+)(?:,\d+)? \+(\d+)/);
+      if (m) { o = +m[1]; n = +m[2]; }
+      hunk = { ctx: line.replace(/^@@[^@]*@@ ?/, ''), rows: [] };
+      file.hunks.push(hunk);
+      continue;
+    }
+    if (!hunk || line.startsWith('\\')) continue;
+    if (line.startsWith('+')) hunk.rows.push({ kind: 'add', o: null, n: n++, text: line.slice(1) });
+    else if (line.startsWith('-')) hunk.rows.push({ kind: 'del', o: o++, n: null, text: line.slice(1) });
+    else if (line !== '') hunk.rows.push({ kind: 'ctx', o: o++, n: n++, text: line.slice(1) });
+  }
+  return files;
+}
+
+// Groups a hunk's rows so each run of removed lines is paired with the added lines that replace it.
+// -> [{ kind: 'ctx', row } | { kind: 'change', dels: [], adds: [] }]
+function pairHunk(rows) {
+  const out = [];
+  let cur = null;
+  for (const r of rows) {
+    if (r.kind === 'ctx') { cur = null; out.push({ kind: 'ctx', row: r }); continue; }
+    if (!cur || (r.kind === 'del' && cur.adds.length)) { cur = { kind: 'change', dels: [], adds: [] }; out.push(cur); }
+    (r.kind === 'del' ? cur.dels : cur.adds).push(r);
+  }
+  return out;
+}
+
+// ---------- commit graph ----------
+// For each commit (newest first), which lane it sits in and how lanes connect to the rows around it.
+function graphRows(commits) {
+  let lanes = [];
+  const rows = [];
+  for (const c of commits) {
+    let col = lanes.indexOf(c.hash);
+    const hasChild = col >= 0;
+    if (col < 0) { col = lanes.indexOf(null); if (col < 0) col = lanes.length; }
+    const before = lanes.slice();
+    const merging = [];
+    before.forEach((h, i) => { if (h === c.hash && i !== col) merging.push(i); });
+    const after = lanes.slice();
+    merging.forEach((i) => { after[i] = null; });
+    after[col] = c.parents[0] || null;
+    const parentCols = c.parents[0] ? [col] : [];
+    for (const p of c.parents.slice(1)) {
+      let pc = after.indexOf(p);
+      if (pc < 0) { pc = after.indexOf(null); if (pc < 0) pc = after.length; after[pc] = p; }
+      parentCols.push(pc);
+    }
+    while (after.length && after[after.length - 1] == null) after.pop();
+    rows.push({ col, hasChild, before, after, merging, parentCols });
+    lanes = after;
+  }
+  return rows;
+}
+
+// ---------- fuzzy search (command palette) ----------
+// Higher is better; -1 = no match. Prefers whole-substring and word-start matches.
+function fuzzyScore(query, text) {
+  const q = query.toLowerCase().trim();
+  const t = text.toLowerCase();
+  if (!q) return 0;
+  const i = t.indexOf(q);
+  if (i >= 0) return 1000 - i + (i === 0 || /[\s/\\._-]/.test(t[i - 1]) ? 200 : 0);
+  let score = 0;
+  let pos = 0;
+  for (const ch of q) {
+    if (ch === ' ') continue;
+    const j = t.indexOf(ch, pos);
+    if (j < 0) return -1;
+    score += j === pos ? 5 : 1;
+    pos = j + 1;
+  }
+  return score;
+}
+
+if (typeof module !== 'undefined') {
+  module.exports = { esc, basename, norm, samePath, plural, timeAgo, parseConflicts, pickLines, myers, diffLines, sideBySide, inlineDiff, toLines, md,
+    langOf, tokenize, highlight, changeRange, parseUnified, pairHunk, graphRows, fuzzyScore };
+}

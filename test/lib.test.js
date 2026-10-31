@@ -1,0 +1,82 @@
+// Tests of the pure UI helpers in renderer/lib.js.
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const lib = require('../renderer/lib');
+
+test('line diff pairs changed lines and keeps unchanged ones', () => {
+  const rows = lib.sideBySide(['a', 'b', 'c', 'd'], ['a', 'B', 'c', 'd', 'e']);
+  assert.deepEqual(rows.map((r) => r.kind), ['same', 'chg', 'same', 'same', 'add']);
+  assert.equal(rows[1].l, 'b');
+  assert.equal(rows[1].r, 'B');
+  const ops = lib.diffLines(['x', 'y'], ['y']);
+  assert.deepEqual(ops, [['-', 0, null], ['=', 1, 0]]);
+});
+
+test('conflict parsing round-trips and applies choices', () => {
+  const text = 'top\n<<<<<<< HEAD\nmine\n||||||| base\norig\n=======\ntheirs\n>>>>>>> feature\nbottom\n';
+  const p = lib.parseConflicts(text);
+  assert.equal(p.count, 1);
+  const c = p.segs[1];
+  assert.deepEqual([c.ours, c.base, c.theirs], [['mine'], ['orig'], ['theirs']]);
+  assert.deepEqual(lib.pickLines(c, 'both'), ['mine', 'theirs']);
+  assert.deepEqual(lib.pickLines(c, 'theirs'), ['theirs']);
+  assert.equal(lib.pickLines(c, undefined), null);
+  assert.equal(lib.parseConflicts('a\n<<<<<<< HEAD\nunfinished\n'), null, 'damaged markers are reported, not guessed');
+});
+
+test('unified diff parsing tracks line numbers and pairs edits', () => {
+  const diff = 'diff --git a/x.js b/x.js\nindex 1..2\n--- a/x.js\n+++ b/x.js\n@@ -1,3 +1,3 @@ fn\n a\n-b\n+B\n c\n';
+  const [f] = lib.parseUnified(diff);
+  assert.equal(f.name, 'x.js');
+  const rows = f.hunks[0].rows;
+  assert.deepEqual(rows.map((r) => [r.kind, r.o, r.n]), [['ctx', 1, 1], ['del', 2, null], ['add', null, 2], ['ctx', 3, 3]]);
+  const groups = lib.pairHunk(rows);
+  assert.equal(groups[1].kind, 'change');
+  assert.equal(groups[1].dels.length, 1);
+  assert.equal(groups[1].adds.length, 1);
+  // a deleted line that itself starts with "--" is not mistaken for a header
+  const [g] = lib.parseUnified('@@ -1 +0,0 @@\n--- comment\n');
+  assert.equal(g.hunks[0].rows[0].kind, 'del');
+});
+
+test('highlighting escapes HTML and marks only the changed part', () => {
+  const html = lib.highlight('const s = "<b>"; // hi', 'c');
+  assert.ok(!html.includes('<b>'), 'user text is escaped');
+  assert.match(html, /hl-kw">const/);
+  assert.match(html, /hl-com/);
+  const r = lib.changeRange('color: red;', 'color: blue;');
+  assert.deepEqual(r.a, [7, 10]);
+  assert.match(lib.highlight('color: red;', null, r.a), /<mark>red<\/mark>/);
+  assert.equal(lib.langOf('src/App.TSX'), 'c');
+  assert.equal(lib.langOf('Dockerfile'), 'hash');
+});
+
+test('commit graph lanes for a merge', () => {
+  // newest first: M merges B into A; both come from R
+  const commits = [
+    { hash: 'M', parents: ['A', 'B'] },
+    { hash: 'B', parents: ['R'] },
+    { hash: 'A', parents: ['R'] },
+    { hash: 'R', parents: [] },
+  ];
+  const g = lib.graphRows(commits);
+  assert.equal(g[0].col, 0);
+  assert.deepEqual(g[0].parentCols, [0, 1]);
+  assert.equal(g[1].col, 1, 'the merged branch gets its own lane');
+  assert.equal(g[2].col, 0);
+  assert.deepEqual(g[3].merging, [1], 'both lanes join at the common parent');
+});
+
+test('fuzzy search ranks whole words first', () => {
+  assert.ok(lib.fuzzyScore('lat', 'Get latest') > lib.fuzzyScore('lat', 'Line them all up'));
+  assert.equal(lib.fuzzyScore('zz', 'Get latest'), -1);
+  assert.ok(lib.fuzzyScore('gl', 'Get latest') > 0);
+});
+
+test('markdown is escaped and supports code and lists', () => {
+  const html = lib.md('**bold** and `x<y`\n\n- one\n- two\n\n```\n<script>\n```');
+  assert.match(html, /<b>bold<\/b>/);
+  assert.match(html, /<code>x&lt;y<\/code>/);
+  assert.match(html, /<ul><li>one<\/li><li>two<\/li><\/ul>/);
+  assert.ok(!html.includes('<script>'));
+});

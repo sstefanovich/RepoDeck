@@ -6,9 +6,43 @@
   "private": true,
   "scripts": {
     "start": "node launch.js",
-    "check": "node --check main.js && node --check preload.js && node --check src/git.js && node --check renderer/app.js"
+    "test": "node --test \"test/*.test.js\"",
+    "dist": "electron-builder --win",
+    "pack": "electron-builder --win --dir",
+    "check": "node --check main.js && node --check preload.js && node --check src/git.js && node --check src/claude.js && node --check renderer/lib.js && node --check renderer/app.js"
   },
   "devDependencies": {
-    "electron": "^45.2.0"
+    "electron": "^45.2.0",
+    "electron-builder": "^26.18.0"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.11"
+  },
+  "build": {
+    "appId": "com.repodeck.app",
+    "productName": "RepoDeck",
+    "files": [
+      "main.js",
+      "preload.js",
+      "src/**",
+      "renderer/**",
+      "build/icon.png",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64", "arm64"]
+        }
+      ],
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "shortcutName": "RepoDeck"
+    }
   }
 }

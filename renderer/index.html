@@ -13,10 +13,12 @@
         <span class="logo">⎇</span>
         <span>RepoDeck</span>
       </div>
+      <button class="btn primary open-repo-btn" data-action="open-repo-folder" title="Pick a folder that already has a git repo in it (or drag a folder onto the window)">📂 Open repo folder…</button>
       <div id="ws-list" class="ws-list"></div>
       <div class="sidebar-foot">
         <button class="btn ghost block" data-action="new-ws">＋ New workspace</button>
         <button class="btn ghost block" data-action="clone">⤓ Clone a repo…</button>
+        <button class="btn ghost block" data-action="claude-toggle" title="Ctrl+J">✦ Ask Claude</button>
         <div class="foot-row">
           <button class="btn ghost" data-action="settings">⚙ Settings</button>
           <button class="btn ghost" data-action="help">? Git explained</button>
@@ -24,6 +26,7 @@
       </div>
     </aside>
     <main id="main">
+      <div id="tabbar" class="tabbar" role="tablist"></div>
       <div id="view" class="view"></div>
       <div id="log" class="log">
         <button class="log-head" data-action="toggle-log">
@@ -34,9 +37,30 @@
         <div id="log-body" class="log-body"></div>
       </div>
     </main>
+    <aside id="claude-panel" class="claude-panel" hidden>
+      <div class="cp-head">
+        <span class="cp-logo">✦</span>
+        <div class="cp-title"><b>Claude</b><div id="cp-scope" class="cp-scope"></div></div>
+        <div class="spacer"></div>
+        <button class="btn small ghost" data-action="claude-history" title="Earlier chats in this workspace">History</button>
+        <button class="btn small ghost" data-action="claude-new" title="Start a new conversation">New chat</button>
+        <button class="icon-btn" data-action="claude-toggle" title="Close (Ctrl+J)" aria-label="Close Claude panel">✕</button>
+      </div>
+      <div id="cp-banner"></div>
+      <div id="cp-msgs" class="cp-msgs"></div>
+      <div class="cp-input">
+        <textarea id="cp-input" rows="3" placeholder="Ask Claude about your branches… (Enter to send, Shift+Enter for a new line)"></textarea>
+        <div class="cp-input-row">
+          <span id="cp-status" class="hint"></span>
+          <div class="spacer"></div>
+          <button class="btn small primary" id="cp-send" data-action="claude-send">Send</button>
+        </div>
+      </div>
+    </aside>
   </div>
   <div id="modal-root"></div>
   <div id="toast-root"></div>
+  <script src="lib.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
