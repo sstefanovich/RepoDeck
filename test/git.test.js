@@ -314,6 +314,42 @@ test('revert an older commit, including a clash', async () => {
   assert.equal((await ops.status(a)).op, null);
 });
 
+test('revert with uncommitted edits in the same file sets them aside and puts them back', async () => {
+  const a = sb.repo('revert-dirty');
+  const ten = Array.from({ length: 10 }, (_, i) => `l${i + 1}`);
+  sb.write(a, 'f.txt', ten.join('\n') + '\n');
+  await ops.commit(a, { message: 'base', paths: [], all: true });
+  sb.write(a, 'f.txt', ['l1', 'CHANGED', ...ten.slice(2)].join('\n') + '\n');
+  await ops.commit(a, { message: 'change l2', paths: [], all: true });
+  const change = await ops.headOid(a);
+  sb.write(a, 'other.txt', 'o\n');
+  await ops.commit(a, { message: 'other', paths: [], all: true });
+  // An uncommitted edit far from the reverted line.
+  sb.write(a, 'f.txt', ['l1', 'CHANGED', ...ten.slice(2, 8), 'MY EDIT', 'l10'].join('\n') + '\n');
+  const before = await ops.headOid(a);
+  const r = await ops.revertCommit(a, change);
+  assert.ok(r.ok && !r.shelved && !r.restoreConflicts);
+  const text = () => fs.readFileSync(path.join(a, 'f.txt'), 'utf8').replace(/\r\n/g, '\n');
+  assert.equal(text(), ['l1', 'l2', ...ten.slice(2, 8), 'MY EDIT', 'l10'].join('\n') + '\n', 'reverted, with the edit kept');
+  assert.equal((await ops.stashList(a)).length, 0, 'nothing left on the Shelf');
+  // Undo (reset --keep) works too, although the edit is in a file it changes.
+  assert.ok((await ops.resetTo(a, before, 'keep')).ok);
+  assert.equal(await ops.headOid(a), before);
+  assert.equal(text(), ['l1', 'CHANGED', ...ten.slice(2, 8), 'MY EDIT', 'l10'].join('\n') + '\n', 'undone, with the edit kept');
+  assert.equal((await ops.stashList(a)).length, 0);
+
+  // A revert that conflicts leaves the edits on the Shelf until it's finished.
+  sb.sh(a, 'checkout', '-q', '--', 'f.txt');
+  await ops.commit(a, { message: 'keep', paths: [], all: true }).catch(() => {});
+  sb.write(a, 'f.txt', ['l1', 'AGAIN', ...ten.slice(2)].join('\n') + '\n');
+  await ops.commit(a, { message: 'l2 again', paths: [], all: true });
+  sb.write(a, 'other.txt', 'uncommitted\n');
+  const c = await ops.revertCommit(a, change);
+  assert.ok(c.conflicts && c.shelved);
+  assert.match((await ops.stashList(a))[0].message, /set aside while reversing/);
+  await ops.abortOp(a, 'revert');
+});
+
 test('compare two branches', async () => {
   const a = sb.repo('compare');
   sb.write(a, 'keep.txt', 'k\n');

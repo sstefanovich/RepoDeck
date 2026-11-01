@@ -1727,13 +1727,19 @@ async function revertCommit(repo, hash, subject) {
   const dirty = changedFiles(st).length;
   const ok = await confirmBox('Reverse this commit?', `<p>This adds a new commit to <b>${esc(st.branch || 'here')}</b> that does the exact opposite of “${esc(subject)}”. The original commit stays in the history, so this is safe even after it was sent to the server.</p>
     ${isMerge ? `<p>This is a merge, so everything it brought in from the other branch is taken back out.</p>` : ''}
-    ${dirty ? `<p class="hint">Your ${plural(dirty, 'uncommitted change')} ${dirty === 1 ? 'is' : 'are'} left alone. If they're in the same files, git will ask you to commit them or put them on the Shelf first.</p>` : ''}
+    ${dirty ? `<p class="hint">Your ${plural(dirty, 'uncommitted change')} ${dirty === 1 ? 'is' : 'are'} set aside while this happens and put back afterwards.</p>` : ''}
     <p class="hint">If later commits changed the same lines, I'll walk you through it, and you can abort.</p>`, '↺ Reverse it');
   if (!ok) return;
   try {
     const before = await gitRaw('headOid', repo).catch(() => null);
     const r = await busy(repo, 'Reversing…', () => git('revertCommit', repo, hash));
-    if (await afterMaybeConflict(repo, r, null)) offerUndoMove(repo, before, `Reversed “${subject}”. Send it to share the fix.`, 'reverse');
+    if (r.conflicts) {
+      await afterMaybeConflict(repo, r, null);
+      if (r.shelved) toast('Your uncommitted changes are waiting on the Shelf. Restore them from there once the reverse is finished.', 'info');
+    } else {
+      offerUndoMove(repo, before, `Reversed “${subject}”. Send it to share the fix.`, `reverse of “${subject}”`);
+      if (r.restoreConflicts) await afterMaybeConflict(repo, { conflicts: true });
+    }
     if (state.tab === 'history') loadHistory();
   } catch (e) { showError("Couldn't reverse the commit", e); }
 }

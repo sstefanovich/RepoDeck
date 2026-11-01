@@ -284,9 +284,16 @@ const ops = {
 
   // Undo helpers. mode 'soft' keeps the undone commit's changes; 'keep' moves the branch back
   // but refuses if that would overwrite uncommitted changes.
+  // 'keep' refuses when uncommitted edits are in files the move would change; those are then
+  // set aside, the branch moved, and the edits put back.
   async resetTo(repo, oid, mode = 'keep') {
-    await must(repo, ['reset', `--${mode}`, oid]);
-    return true;
+    const r = await run(repo, ['reset', `--${mode}`, oid]);
+    if (r.ok) return { ok: true };
+    if (mode !== 'keep' || !/not uptodate|would be overwritten|local changes/i.test(r.stderr)) throw new GitError(r.stderr);
+    await must(repo, ['stash', 'push', '--include-untracked', '-m', 'set aside while undoing']);
+    const moved = await run(repo, ['reset', '--keep', oid]);
+    if (!moved.ok) { await run(repo, ['stash', 'pop']); throw new GitError(moved.stderr); }
+    return withConflicts(repo, await run(repo, ['stash', 'pop']));
   },
 
   async restoreBranch(repo, name, oid) {
@@ -451,9 +458,19 @@ const ops = {
   },
 
   // A new commit that does the opposite of `hash`. Merge commits are reversed against their first parent.
+  // git won't revert over uncommitted edits to the same files, so they're shelved meanwhile and put back.
+  // If the revert stops at a conflict they stay on the Shelf (shelved: true) until it's finished.
   async revertCommit(repo, hash) {
+    const st = await ops.status(repo);
+    const dirty = st.staged.length + st.unstaged.length + st.untracked.length > 0;
     const merge = (await run(repo, ['rev-list', '--no-walk', '--min-parents=2', hash], { quiet: true })).stdout.trim();
-    return withConflicts(repo, await run(repo, ['revert', '--no-edit', ...(merge ? ['-m', '1'] : []), hash]));
+    if (dirty) await must(repo, ['stash', 'push', '--include-untracked', '-m', revertShelfMessage(st.branch)]);
+    let r;
+    try { r = await withConflicts(repo, await run(repo, ['revert', '--no-edit', ...(merge ? ['-m', '1'] : []), hash])); }
+    catch (e) { if (dirty) await run(repo, ['stash', 'pop']); throw e; }
+    if (r.conflicts || !dirty) return { ...r, shelved: dirty && !!r.conflicts };
+    const p = await withConflicts(repo, await run(repo, ['stash', 'pop']));
+    return { ...r, restoreConflicts: !!p.conflicts };
   },
 
   // What `head` changes compared with `base`. mode 'split': only what happened on head since the
@@ -736,6 +753,7 @@ const ops = {
 // Message used when changes are shelved automatically; the UI looks for it to
 // offer restoring them when you come back to the branch.
 const autoShelfMessage = (from, to) => `[auto] ${from}: left behind when switching to ${to}`;
+const revertShelfMessage = (branch) => `[auto] ${branch}: set aside while reversing a commit`;
 
 // One patch per partly-ticked file, made from a fresh diff so it matches the files on disk.
 async function partialPatches(repo, partial) {
@@ -791,7 +809,7 @@ const plans = {
   },
   resetTo: (repo, oid, mode = 'keep') => [step(['reset', `--${mode}`, oid.slice(0, 10)], mode === 'soft'
     ? 'Move the branch back to before that commit, keeping its changes in your folder.'
-    : 'Move the branch back to where it was before. Refuses if it would overwrite uncommitted changes.')],
+    : 'Move the branch back to where it was before. Uncommitted edits in the files it changes are set aside and put back.')],
   restoreBranch: (repo, name, oid) => [step(['branch', name, oid.slice(0, 10)], `Bring the branch ${name} back, exactly as it was.`)],
   stashStore: (repo, oid, message) => [step(['stash', 'store', '-m', message, oid.slice(0, 10)], 'Put the deleted item back on the Shelf.')],
   async discard(repo, paths) {
@@ -828,8 +846,14 @@ const plans = {
     ? step(['rebase', '--autostash', ref], `Replay your commits on top of the latest ${ref}, as if you had started from there. Gives a straight history; your commits get new IDs.`)
     : step(['merge', '--no-edit', '--autostash', ref], `Bring ${ref}'s new commits into your branch with a merge commit. Nothing that's already there is rewritten.`)],
   async revertCommit(repo, hash) {
+    const st = await ops.status(repo);
+    const dirty = st.staged.length + st.unstaged.length + st.untracked.length > 0;
     const merge = (await run(repo, ['rev-list', '--no-walk', '--min-parents=2', hash], { quiet: true })).stdout.trim();
-    return [step(['revert', '--no-edit', ...(merge ? ['-m', '1'] : []), hash.slice(0, 10)], 'Make a new commit that does the exact opposite of that one. The original commit stays in the history.')];
+    return [
+      ...(dirty ? [step(['stash', 'push', '--include-untracked', '-m', revertShelfMessage(st.branch)], 'Put your uncommitted changes on the Shelf for a moment.')] : []),
+      step(['revert', '--no-edit', ...(merge ? ['-m', '1'] : []), hash.slice(0, 10)], 'Make a new commit that does the exact opposite of that one. The original commit stays in the history.'),
+      ...(dirty ? [step(['stash', 'pop'], 'Put your uncommitted changes back.')] : []),
+    ];
   },
   undoLastCommit: () => [step(['reset', '--soft', 'HEAD~1'], 'Remove the last commit but keep all its changes in your folder, ready to commit again.')],
   stashSave: (repo, message) => [step(['stash', 'push', '--include-untracked', ...(message ? ['-m', message] : [])], 'Put all uncommitted changes (including new files) on the Shelf and make your folder match your last commit.')],

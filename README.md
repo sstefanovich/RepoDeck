@@ -60,7 +60,7 @@ After a commit, merge, get latest, update from another branch, reversed commit, 
 
 - A **commit graph**, **search** by message, author or hash, and **history of a single file**.
 - **✦ Explain** asks Claude what a commit did and why.
-- **Reverse this commit** (`git revert`) backs out any earlier commit by adding one that does the opposite. It's safe even after the commit was sent, unlike Undo.
+- **Reverse this commit** (`git revert`) backs out any earlier commit by adding one that does the opposite. It's safe even after the commit was sent, unlike Undo. Uncommitted edits in the same files are set aside and put back.
 - **Cherry-pick:** open any branch, tick commits, and copy them into your branch. Commits already there are hidden.
 - **Copy to another branch** works without switching yourself: RepoDeck shelves your work, switches, cherry-picks, comes back and restores it.
 - If a cherry-pick stops with a conflict, you can **Continue**, **Skip this commit** or **Abort**.
