@@ -12,6 +12,28 @@ test('line diff pairs changed lines and keeps unchanged ones', () => {
   assert.deepEqual(ops, [['-', 0, null], ['=', 1, 0]]);
 });
 
+test('a patch of only some lines keeps the rest as context and fixes line numbers', () => {
+  const head = 'diff --git a/x b/x\nindex 1..2 100644\n--- a/x\n+++ b/x\n';
+  const diff = `${head}@@ -1,2 +1,3 @@\n a\n+new1\n b\n@@ -9,2 +10,2 @@ ctx\n-old\n+NEW\n z\n`;
+  const lines = lib.changedLines(diff);
+  const key = (text) => lines.find((r) => r.text === text).key;
+  // Leave out the first block: the second hunk moves up by one line.
+  assert.equal(lib.partialPatch(diff, [key('new1')]), `${head}@@ -9,2 +9,2 @@ ctx\n-old\n+NEW\n z\n`);
+  // Keep the removal but not its replacement.
+  assert.equal(lib.partialPatch(diff, [key('new1'), key('NEW')]), `${head}@@ -9,2 +9,1 @@ ctx\n-old\n z\n`);
+  // Leave out the removal: the line stays, as context.
+  assert.equal(lib.partialPatch(diff, [key('old')]), `${head}@@ -1,2 +1,3 @@\n a\n+new1\n b\n@@ -9,2 +10,3 @@ ctx\n old\n+NEW\n z\n`);
+  assert.equal(lib.partialPatch(diff, [key('new1'), key('old'), key('NEW')]), null, 'nothing left to commit');
+  // "No newline at end of file" follows its line in or out.
+  const nl = `${head}@@ -1,1 +1,2 @@\n a\n+b\n\\ No newline at end of file\n`;
+  assert.equal(lib.partialPatch(nl, []), nl);
+  // Keys don't depend on line numbers, so an edit higher up doesn't change which line is left out.
+  const shifted = `${head}@@ -1,2 +1,4 @@\n a\n+x\n+new1\n b\n@@ -9,2 +12,2 @@ ctx\n-old\n+NEW\n z\n`;
+  assert.equal(lib.changedLines(shifted).find((r) => r.text === 'new1').key, key('new1'));
+  // Repeated identical lines get their own keys.
+  assert.deepEqual(lib.changedLines(`${head}@@ -1,0 +1,2 @@\n+}\n+}\n`).map((r) => r.key), ['+}#0', '+}#1']);
+});
+
 test('conflict parsing round-trips and applies choices', () => {
   const text = 'top\n<<<<<<< HEAD\nmine\n||||||| base\norig\n=======\ntheirs\n>>>>>>> feature\nbottom\n';
   const p = lib.parseConflicts(text);

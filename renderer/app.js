@@ -12,7 +12,7 @@ const MUTATING = new Set([
   'commit', 'discard', 'ignore', 'fetch', 'pull', 'push', 'addRemote', 'createBranch', 'switchBranch', 'checkoutRemote',
   'renameBranch', 'deleteBranch', 'merge', 'undoLastCommit', 'stashSave', 'stashApply', 'stashPop', 'stashDrop',
   'resolveSide', 'saveResolution', 'markResolved', 'abortOp', 'continueOp', 'skipOp', 'cherryPick', 'cherryPickOnto',
-  'clone', 'init', 'setIdentity', 'resetTo', 'restoreBranch', 'stashStore',
+  'clone', 'init', 'setIdentity', 'resetTo', 'restoreBranch', 'stashStore', 'updateFrom', 'revertCommit',
 ]);
 let previewSuppressed = 0;
 const CANCELLED = 'CANCELLED';
@@ -83,6 +83,8 @@ const state = {
   view: { type: 'home' },
   tab: 'changes',
   checked: {},       // repo -> { file: true/false } for the commit checkboxes
+  excluded: {},      // repo -> { file: Set of line keys } left out of the next commit
+  diffKeys: null,    // { repo, path, keys } of the changed lines in the diff on screen
   selected: {},      // repo -> selected file in Changes
   commitMsg: {},     // repo -> { summary, body }
   busy: {},          // repo -> "Getting latest…"
@@ -373,7 +375,7 @@ function renderSidebar() {
         const branch = st?.detached ? 'detached' : st?.branch || '';
         return `<div class="repo-item ${activeRepo ? 'active' : ''}" data-action="open-repo" data-repo="${esc(p)}" data-ws="${w.id}" title="${esc(p)}">
           <div class="ri-top"><span class="ri-name">${esc(basename(p))}</span>${busyLabel(p) ? `<span class="spinner sm" role="status" aria-label="${esc(busyLabel(p))}"></span>` : ''}</div>
-          <div class="ri-bottom"><span class="ri-branch">⎇ ${esc(branch)}</span><span class="ri-badges">${badgesHtml(st)}</span></div>
+          <div class="ri-bottom"><button class="ri-branch" data-action="branch-switcher" data-repo="${esc(p)}" title="Switch branch" ${st && !st.error && !st.missing ? '' : 'disabled'}>⎇ ${esc(branch)}</button><span class="ri-badges">${badgesHtml(st)}</span></div>
         </div>`;
       }).join('') || '<div class="muted small pad">No repos yet — click ＋</div>'}</div>`}
     </div>`;
@@ -590,7 +592,8 @@ function renderWorkspaceCards() {
         <div><div class="card-title">${esc(basename(p))}</div><div class="path">${esc(p)}</div></div>
         ${busyHtml(p)}
       </div>
-      <div class="card-branch">⎇ <b>${esc(st.detached ? 'detached HEAD' : st.branch || '')}</b></div>
+      <div class="card-branch">⎇ <b>${esc(st.detached ? 'detached HEAD' : st.branch || '')}</b>
+        ${st.error || st.missing ? '' : `<button class="btn small ghost" data-action="branch-switcher" data-repo="${esc(p)}" title="Switch this repo to another branch">Switch…</button>`}</div>
       <div class="facts">${facts}</div>
       <div class="card-actions">
         <button class="btn small primary" data-action="open-repo" data-repo="${esc(p)}" data-ws="${w.id}">Open</button>
@@ -619,6 +622,7 @@ function openRepo(repo, wsId, tab) {
     state.branches = state.history = state.stashes = null;
     state.selCommit = state.selStash = state.conflict = null;
     state.histRef = null;
+    state.cmp = null;
     state.picks.clear();
     state.headKey = `${st.branch}|${st.oid}`;
   }
@@ -647,6 +651,7 @@ function updateRepoView() {
   else if (state.tab === 'conflicts') renderConflictList();
   else if (state.tab === 'branches' && headChanged) loadBranches();
   else if (state.tab === 'history' && headChanged) loadHistory();
+  else if (state.tab === 'compare' && headChanged) loadCompare();
   else if (state.tab === 'shelf') loadShelf();
 }
 
@@ -670,7 +675,7 @@ function repoHeaderHtml(repo) {
     : `<button class="btn ${st.ahead || (!st.upstream && !st.initial && !st.detached) ? 'primary' : ''}" data-action="push" data-repo="${esc(repo)}" ${d} title="git push — uploads your commits to the server">↑ ${st.upstream || st.detached ? 'Send' : 'Publish branch'}${st.ahead ? ` (${st.ahead})` : ''}</button>`;
   return `${top}
     <div class="rh-bar">
-      <button class="branch-pill" data-action="branch-switcher" data-repo="${esc(repo)}" title="Switch or create branches" aria-haspopup="dialog">⎇ <b>${esc(branchLabel)}</b> <span class="muted" aria-hidden="true">▾</span></button>
+      <button class="branch-pill" data-action="branch-switcher" data-repo="${esc(repo)}" title="Switch to another branch, or create one" aria-haspopup="dialog">⎇ <b>${esc(branchLabel)}</b> <span class="pill-action">Switch branch ▾</span></button>
       <div class="sync-text" title="${esc(sync.replace(/<[^>]+>/g, ''))}">${sync}${checked ? ` <span class="muted small">(${checked})</span>` : ''}</div>
       <div class="spacer"></div>
       ${busyHtml(repo)}
@@ -722,6 +727,7 @@ function tabsHtml(repo) {
     ['changes', `Changes${n ? ` <span class="count">${n}</span>` : ''}`, 'Files you have edited since your last commit'],
     ['branches', 'Branches', 'Parallel versions of the code'],
     ['history', 'History', 'Commits made so far'],
+    ['compare', 'Compare', 'What is different between two branches'],
     ['shelf', `Shelf${st.stashCount ? ` <span class="count">${st.stashCount}</span>` : ''}`, "Changes you've set aside for later (git calls this “stash”)"],
   ];
   if (st.conflicted?.length || st.op) tabs.unshift(['conflicts', `⚠ Conflicts${st.conflicted?.length ? ` <span class="count bad">${st.conflicted.length}</span>` : ''}`, 'Files where two sets of changes clash']);
@@ -739,6 +745,7 @@ function renderTab() {
   if (t === 'changes') renderChangesTab();
   else if (t === 'branches') { renderBranchesTab(); loadBranches(); }
   else if (t === 'history') { renderHistoryTab(); loadHistory(); }
+  else if (t === 'compare') { renderCompareTab(); loadCompare(); }
   else if (t === 'shelf') { renderShelfTab(); loadShelf(); }
   else if (t === 'conflicts') renderConflictsTab();
 }
@@ -810,6 +817,10 @@ function renderFileList() {
   const present = new Set(files.map((f) => f.path));
   for (const k of Object.keys(checked)) if (!present.has(k)) delete checked[k];
   for (const f of files) if (!(f.path in checked)) checked[f.path] = true;
+  for (const k of Object.keys(state.excluded[repo] || {})) {
+    const f = files.find((x) => x.path === k);
+    if (!f || !canPickLines(st, f)) clearPicks(repo, k);
+  }
   const n = files.filter((f) => checked[f.path]).length;
 
   $('#commit-box').style.display = files.length || st.op ? '' : 'none';
@@ -830,8 +841,9 @@ function renderFileList() {
       const slash = f.path.lastIndexOf('/');
       const dir = slash >= 0 ? f.path.slice(0, slash + 1) : '';
       const name = f.path.slice(slash + 1);
+      const part = partlyPicked(repo, f.path);
       return `<div class="file ${f.path === sel ? 'selected' : ''}" data-action="select-file" data-path="${esc(f.path)}">
-        <input type="checkbox" data-action="check-file" data-path="${esc(f.path)}" ${checked[f.path] ? 'checked' : ''} title="Include in the next commit">
+        <input type="checkbox" data-action="check-file" data-path="${esc(f.path)}" ${checked[f.path] ? 'checked' : ''} ${part ? 'data-part="1"' : ''} title="${part ? 'Only some lines are ticked. Click to include the whole file.' : 'Include in the next commit'}">
         <span class="code c-${f.code === '?' ? 'N' : f.code}" title="${CODE_LABEL[f.code] || f.code}">${f.code === '?' ? 'N' : f.code}</span>
         <span class="fname" title="${esc(f.orig ? `${f.orig} → ${f.path}` : f.path)}"><b>${esc(name)}</b> <span class="muted">${esc(dir)}</span></span>
         <span class="file-actions">
@@ -842,6 +854,7 @@ function renderFileList() {
       </div>`;
     }).join('');
     if (!sel || !present.has(sel)) state.selected[repo] = files[0].path;
+    list.querySelectorAll('[data-part]').forEach((b) => { b.indeterminate = true; });
   }
   updateCommitButtons();
 }
@@ -865,7 +878,9 @@ function updateCommitButtons() {
   btn.dataset.action = 'commit';
   $('#commit-push-btn').style.display = '';
   const amend = $('#amend')?.checked;
-  btn.textContent = amend ? `Amend last commit${n ? ` (+${plural(n, 'file')})` : ''}` : n ? `Commit ${plural(n, 'file')} to ${st.branch || 'branch'}` : 'Tick some files to commit';
+  const part = files.filter((f) => partlyPicked(repo, f.path)).length;
+  const what = `${plural(n, 'file')}${part ? ` (${part} in part)` : ''}`;
+  btn.textContent = amend ? `Amend last commit${n ? ` (+${what})` : ''}` : n ? `Commit ${what} to ${st.branch || 'branch'}` : 'Tick some files to commit';
   btn.disabled = (!n && !amend) || !summary;
   $('#commit-push-btn').disabled = btn.disabled;
   btn.title = !summary && (n || amend) ? 'Type a summary first' : amend ? 'git commit --amend — Ctrl+Enter' : 'git commit — Ctrl+Enter';
@@ -887,16 +902,87 @@ async function refreshDiff() {
   const prev = pane.querySelector('.diff-scroll');
   const keepScroll = prev && pane.dataset.file === f.path ? prev.scrollTop : 0;
   pane.dataset.file = f.path;
+  const pickable = d.kind === 'text' && canPickLines(state.status[repo], f);
+  state.diffKeys = pickable ? { repo, path: f.path, keys: changedLines(d.text).map((x) => x.key) } : null;
+  if (pickable) prunePicks(repo, f.path);
+  const split = state.config.settings.diffMode === 'split';
   pane.innerHTML = `<div class="diff-head">
       <b>${esc(f.path)}</b>${f.orig ? ` <span class="muted">(was ${esc(f.orig)})</span>` : ''}
       <span class="tag c-${f.code === '?' ? 'N' : f.code}">${CODE_LABEL[f.code] || f.code}</span>
+      ${pickable ? `<span class="muted small" id="pick-count">${split ? 'Switch to Inline to commit only some lines.' : ''}</span>` : ''}
       <div class="spacer"></div>
       ${diffModeToggle()}
       ${f.untracked ? '' : `<button class="btn small ghost" data-action="file-history" data-path="${esc(f.path)}" title="Every commit that changed this file">History</button>`}
       <button class="btn small ghost" data-action="open-file" data-path="${esc(f.path)}">Open in ${esc(editorName())}</button>
     </div>
-    <div class="diff-scroll">${diffBody(d, f.path)}</div>`;
+    <div class="diff-scroll">${d.kind === 'text' ? renderDiff(d.text, { file: f.path, picked: pickable ? (k) => isPicked(repo, f.path, k) : null }) : diffBody(d, f.path)}</div>`;
   pane.querySelector('.diff-scroll').scrollTop = keepScroll;
+  syncPickBoxes();
+}
+
+// ---------- committing only some lines ----------
+// state.excluded[repo][file] holds the keys of lines left out of the next commit. A file
+// is "partly ticked" while it has some; ticked files without an entry are committed whole.
+const canPickLines = (st, f) => !!st && !st.op && !st.initial && !f.untracked && !f.orig && f.code === 'M';
+const isPicked = (repo, file, key) => !!state.checked[repo]?.[file] && !state.excluded[repo]?.[file]?.has(key);
+const partlyPicked = (repo, file) => !!state.checked[repo]?.[file] && !!state.excluded[repo]?.[file]?.size;
+
+// Tick (on) or untick lines of the file shown in the diff.
+function pickLines(repo, file, keys, on) {
+  const all = state.diffKeys?.path === file ? state.diffKeys.keys : [];
+  const ex = (state.excluded[repo] ||= {});
+  const checked = (state.checked[repo] ||= {});
+  let set = checked[file] ? new Set(ex[file] || []) : new Set(all);
+  checked[file] = true;
+  for (const k of keys) { if (on) set.delete(k); else set.add(k); }
+  set = new Set([...set].filter((k) => all.includes(k)));
+  if (set.size >= all.length) { checked[file] = false; delete ex[file]; }
+  else if (!set.size) delete ex[file];
+  else ex[file] = set;
+}
+
+// Forget left-out lines that are gone from the file (e.g. edited away in the editor).
+function prunePicks(repo, file) {
+  const set = state.excluded[repo]?.[file];
+  if (!set) return;
+  const now = new Set(state.diffKeys.keys);
+  for (const k of [...set]) if (!now.has(k)) set.delete(k);
+  if (!set.size) delete state.excluded[repo][file];
+  else if (set.size >= now.size) { delete state.excluded[repo][file]; state.checked[repo][file] = false; }
+}
+
+function clearPicks(repo, file) {
+  if (file) delete state.excluded[repo]?.[file];
+  else delete state.excluded[repo];
+}
+
+// Brings the line and block tick boxes in the diff up to date, without redrawing it.
+function syncPickBoxes() {
+  const pane = $('#diff-pane');
+  const k = state.diffKeys;
+  if (!pane || !k || pane.dataset.file !== k.path) return;
+  pane.querySelectorAll('[data-action=pick-line]').forEach((b) => {
+    b.checked = isPicked(k.repo, k.path, b.dataset.key);
+    b.closest('.dl').classList.toggle('off', !b.checked);
+  });
+  pane.querySelectorAll('[data-action=pick-hunk]').forEach((b) => {
+    const lines = [...pane.querySelectorAll(`.dl[data-h="${b.dataset.h}"] [data-action=pick-line]`)];
+    const on = lines.filter((x) => x.checked).length;
+    b.checked = on > 0 && on === lines.length;
+    b.indeterminate = on > 0 && on < lines.length;
+  });
+  const count = $('#pick-count');
+  if (count && state.config.settings.diffMode !== 'split') {
+    const total = k.keys.length;
+    const on = k.keys.filter((key) => isPicked(k.repo, k.path, key)).length;
+    count.textContent = on && on < total ? `${on} of ${plural(total, 'changed line')} ticked` : '';
+  }
+}
+
+// After ticking lines: update the file list and commit button to match.
+function afterPick() {
+  syncPickBoxes();
+  renderFileList();
 }
 
 function diffBody(d, file) {
@@ -914,24 +1000,36 @@ const diffModeToggle = () => {
 
 // Renders a unified diff with syntax colours and word-level highlights, inline or side by side.
 // `file` names the file when the diff text has no "diff --git" header (e.g. a new file).
-function renderDiff(text, { maxLines = 6000, file = '' } = {}) {
+// `picked(key)`: show a tick box on each changed line (inline layout only), ticked when it returns true.
+function renderDiff(text, { maxLines = 6000, file = '', picked = null } = {}) {
   if (!text || !text.trim()) return '<div class="empty muted">No line changes to show (maybe only file permissions or line endings changed).</div>';
   const split = state.config.settings.diffMode === 'split';
+  const picking = !!picked && !split;
   const files = parseUnified(text);
   const out = [];
   let count = 0;
+  let hunkNo = 0;
   const ln = (x) => `<span class="ln">${x ?? ''}</span>`;
-  const line = (kind, r, html) => (split ? '' : `<div class="dl ${kind}">${ln(r.o)}${ln(r.n)}<span class="code">${html || ' '}</span></div>`);
+  const box = (r) => {
+    if (!picking) return '';
+    if (!r.key) return '<span class="lp"></span>';
+    return `<span class="lp"><input type="checkbox" data-action="pick-line" data-key="${esc(r.key)}" ${picked(r.key) ? 'checked' : ''} aria-label="Include this line in the commit"></span>`;
+  };
+  const line = (kind, r, html) => (split ? '' : `<div class="dl ${kind} ${picking && r.key && !picked(r.key) ? 'off' : ''}" ${r.key ? `data-h="${hunkNo}"` : ''}>${box(r)}${ln(r.o)}${ln(r.n)}<span class="code">${html || ' '}</span></div>`);
   const sbsRow = (kind, l, r, lh, rh) => `<div class="sr ${kind}">${ln(l?.o)}<span class="sc l">${lh || ' '}</span>${ln(r?.n)}<span class="sc r">${rh || ' '}</span></div>`;
   for (const f of files) {
     const lang = langOf(f.name || file);
+    const key = lineKeyer();
     if (f.name && (files.length > 1 || file !== f.name)) {
       out.push(`<div class="dfile"><span>${esc(f.name)}</span><button class="btn small ghost" data-action="file-history" data-path="${esc(f.name)}" title="Every commit that changed this file">History</button></div>`);
     }
     for (const n of f.notes) out.push(`<div class="dnote">${esc(n)}</div>`);
     for (const h of f.hunks) {
       if (count > maxLines) break;
-      out.push(split ? `<div class="sr gap hunk-gap">${esc(h.ctx) || '⋯'}</div>` : `<div class="dl hunk">${ln('⋯')}${ln('⋯')}<span class="code">${esc(h.ctx)}</span></div>`);
+      hunkNo++;
+      if (picking) for (const r of h.rows) if (r.kind !== 'ctx') r.key = key(r.kind, r.text);
+      const hunkBox = picking ? `<span class="lp"><input type="checkbox" data-action="pick-hunk" data-h="${hunkNo}" title="Tick or untick this whole block" aria-label="Include this block in the commit"></span>` : '';
+      out.push(split ? `<div class="sr gap hunk-gap">${esc(h.ctx) || '⋯'}</div>` : `<div class="dl hunk">${hunkBox}${ln('⋯')}${ln('⋯')}<span class="code">${esc(h.ctx)}</span></div>`);
       for (const g of pairHunk(h.rows)) {
         if (++count > maxLines) { out.push('<div class="dnote">… the rest is too long to show here. Open the file in your editor.</div>'); break; }
         if (g.kind === 'ctx') {
@@ -979,9 +1077,13 @@ async function doCommit(repo, thenPush) {
   if (!ticked.length && !amend) return;
   const paths = ticked.flatMap((f) => (f.orig ? [f.path, f.orig] : [f.path]));
   const message = body ? `${summary}\n\n${body}` : summary;
+  // Files with some lines left out: { file: [keys of the left-out lines] }.
+  const partial = st.op ? null : Object.fromEntries(ticked.filter((f) => partlyPicked(repo, f.path)).map((f) => [f.path, [...state.excluded[repo][f.path]]]));
+  const some = partial && Object.keys(partial).length ? partial : null;
   try {
     const before = await gitRaw('headOid', repo).catch(() => null);
-    await busy(repo, amend ? 'Amending…' : 'Committing…', () => git('commit', repo, { message, paths, all: files.length > 0 && ticked.length === files.length, amend }));
+    await busy(repo, amend ? 'Amending…' : 'Committing…', () => git('commit', repo, { message, paths, all: !some && files.length > 0 && ticked.length === files.length, amend, partial: some }));
+    clearPicks(repo);
     state.commitMsg[repo] = { summary: state.config.settings.commitTemplate || '', body: '' };
     $('#commit-summary').value = state.commitMsg[repo].summary;
     $('#commit-body').value = '';
@@ -1114,8 +1216,9 @@ function renderBranchesTab() {
   const b = state.branches;
   const st = state.status[currentRepo()] || {};
   const cur = st.branch;
-  const head = `<div class="toolbar">
+  const head = `<div class="toolbar wrap">
       <button class="btn primary" data-action="new-branch" data-repo="${esc(currentRepo())}">⎇ New branch…</button>
+      ${cur ? `<button class="btn" data-action="update-from" data-repo="${esc(currentRepo())}" title="Bring in the new commits from main, dev or any other branch">⤓ Update ${esc(cur)} from…</button>` : ''}
       <input class="filter" id="branch-filter" placeholder="Filter branches…" spellcheck="false" aria-label="Filter branches">
       <button class="btn ghost" data-action="tidy" data-repo="${esc(currentRepo())}" title="Delete branches that were merged or deleted on the server">🧹 Tidy up…</button>
       <div class="spacer"></div>
@@ -1251,14 +1354,84 @@ async function mergeBranch(repo, name) {
   } catch (e) { showError("Couldn't merge", e); }
 }
 
+// Bring the latest from another branch (main, dev, a teammate's branch…) into the current one.
+async function updateFrom(repo) {
+  const st = state.status[repo] || {};
+  if (st.op) { toast('Finish or abort what is in progress first (see the yellow banner).', 'warn'); return; }
+  if (!st.branch) { toast("You're not on a branch. Switch to one first.", 'warn'); return; }
+  const b = await gitRaw('branches', repo).catch(() => null);
+  if (!b) return;
+  const local = b.local.filter((x) => !x.current).map((x) => x.name);
+  const remote = b.remote.map((x) => x.name).filter((n) => n !== st.upstream);
+  if (!local.length && !remote.length) { toast('There is no other branch to update from.', 'info'); return; }
+  const memoKey = `${norm(repo)}|${st.branch}`;
+  const remembered = state.config.updateFrom?.[memoKey];
+  const def = await gitRaw('defaultBranch', repo).catch(() => null);
+  const all = [...local, ...remote];
+  const pick = [remembered, def && `origin/${def}`, def].find((x) => x && x !== st.branch && all.includes(x)) || all[0];
+  const opt = (n) => `<option value="${esc(n)}" ${n === pick ? 'selected' : ''}>${esc(n)}</option>`;
+  const r = await modal({
+    title: `Update ${st.branch} from another branch`,
+    body: `<label class="field"><span>Bring in the new commits from</span><select name="ref">
+        ${local.length ? `<optgroup label="Branches on your computer">${local.map(opt).join('')}</optgroup>` : ''}
+        ${remote.length ? `<optgroup label="On the server (latest you've checked)">${remote.map(opt).join('')}</optgroup>` : ''}
+      </select></label>
+      <p class="uf-info" id="uf-info"><span class="spinner sm"></span></p>
+      <div class="field"><span>How</span>
+        <label class="check"><input type="radio" name="mode" value="merge" checked> <span><b>Merge</b> (recommended) — adds a merge commit. Nothing you've already made is rewritten.</span></label>
+        <label class="check" id="uf-rebase"><input type="radio" name="mode" value="rebase"> <span><b>Rebase</b> — replays your commits on top, for a straight history. Your commits get new IDs.</span></label>
+      </div>
+      <p class="hint">Uncommitted changes are set aside and put back automatically. If both branches changed the same lines, I'll walk you through it, and you can abort.</p>`,
+    buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'ok', label: 'Update', kind: 'primary' }],
+    init: (el) => {
+      const sel = el.querySelector('[name=ref]');
+      const info = el.querySelector('#uf-info');
+      const rebase = el.querySelector('[value=rebase]');
+      const ok = el.querySelector('[data-close=ok]');
+      const show = async () => {
+        const ref = sel.value;
+        info.innerHTML = '<span class="spinner sm"></span>';
+        const c = await gitRaw('compareCounts', repo, ref).catch(() => null);
+        if (sel.value !== ref || !el.isConnected) return;
+        if (!c) { info.textContent = ''; return; }
+        info.innerHTML = c.behind
+          ? `<b>${esc(ref)}</b> has <b>${plural(c.behind, 'commit')}</b> that ${esc(st.branch)} doesn't have yet.`
+          : `${esc(st.branch)} already has everything from <b>${esc(ref)}</b>.`;
+        ok.disabled = !c.behind;
+        rebase.disabled = !c.canRebase;
+        if (!c.canRebase && rebase.checked) el.querySelector('[value=merge]').checked = true;
+        el.querySelector('#uf-rebase').title = c.canRebase ? 'git rebase' : `Not available: ${plural(c.sent, 'commit')} on ${st.branch} ${c.sent === 1 ? 'is' : 'are'} already on the server, and rebasing would rewrite ${c.sent === 1 ? 'it' : 'them'}.`;
+      };
+      sel.addEventListener('change', show);
+      show();
+    },
+  });
+  if (r.id !== 'ok') return;
+  const ref = r.values.ref;
+  state.config.updateFrom = { ...state.config.updateFrom, [memoKey]: ref };
+  saveConfig();
+  try {
+    const before = await gitRaw('headOid', repo).catch(() => null);
+    const res = await busy(repo, `Updating from ${ref}…`, () => git('updateFrom', repo, ref, r.values.mode));
+    if (await afterMaybeConflict(repo, res, null)) {
+      if (/up to date/i.test(res.output || '')) toast(`${st.branch} already has everything from ${ref}.`, 'ok');
+      else offerUndoMove(repo, before, `Updated ${st.branch} from ${ref}.`, `update from ${ref}`);
+    }
+    if (samePath(repo, currentRepo()) && ['branches', 'history'].includes(state.tab)) renderTab();
+  } catch (e) { showError(`Couldn't update from ${ref}`, e); }
+}
+
 async function branchMenu(repo, name) {
   const b = state.branches?.local.find((x) => x.name === name);
   if (!b) return;
+  const cur = state.status[repo]?.branch;
   const c = await choose(name, '', [
+    ...(b.current || !cur ? [] : [{ id: 'compare', label: `Compare with ${cur}`, desc: `See what ${esc(name)} has that ${esc(cur)} doesn't.` }]),
     { id: 'rename', label: 'Rename…' },
     ...(b.current ? [] : [{ id: 'delete', label: 'Delete…', desc: 'Removes the branch from your computer (and optionally the server).', kind: 'danger' }]),
   ]);
-  if (c === 'rename') {
+  if (c === 'compare') showCompare(cur, name);
+  else if (c === 'rename') {
     const nn = await ask(`Rename ${name}`, { label: 'New name', value: name, transform: branchTransform, okLabel: 'Rename', help: b.upstream ? "Note: this only renames it on your computer. The server still has the old name." : '' });
     if (!nn || nn === name) return;
     try { await git('renameBranch', repo, name, nn); toast('Renamed.', 'ok'); loadBranches(); refreshAll(); }
@@ -1327,9 +1500,10 @@ function showHistoryOf(ref) {
 function refTags(refs) {
   return refs.map((r) => {
     if (r === 'HEAD') return '';
-    if (r.startsWith('HEAD -> ')) return `<span class="tag current">${esc(r.slice(8))}</span>`;
-    if (r.startsWith('tag: ')) return `<span class="tag">🏷 ${esc(r.slice(5))}</span>`;
-    return `<span class="tag ${r.includes('/') ? 'remote' : ''}">${esc(r)}</span>`;
+    // title shows the full name when a long one is cut short.
+    if (r.startsWith('HEAD -> ')) return `<span class="tag current" title="${esc(r.slice(8))}">${esc(r.slice(8))}</span>`;
+    if (r.startsWith('tag: ')) return `<span class="tag" title="${esc(r.slice(5))}">🏷 ${esc(r.slice(5))}</span>`;
+    return `<span class="tag ${r.includes('/') ? 'remote' : ''}" title="${esc(r)}">${esc(r)}</span>`;
   }).join(' ');
 }
 
@@ -1538,10 +1712,138 @@ async function loadCommitDetails() {
         <button class="btn small ghost" data-action="explain-commit" data-hash="${d.hash}" data-subject="${esc(subject)}" title="Ask Claude to explain this commit">✦ Explain</button>
         ${state.histRef ? `<button class="btn small primary" data-action="cherry-pick-one" data-hash="${d.hash}" title="git cherry-pick">🍒 Cherry-pick into ${esc(cur)}</button>` : ''}
         <button class="btn small" data-action="cherry-pick-to-one" data-hash="${d.hash}">Copy to another branch…</button>
-        ${canUndo ? `<button class="btn small" data-action="undo-commit" title="git reset --soft HEAD~1">↶ Undo this commit</button><span class="hint">Undo keeps your changes (they go back to the Changes tab). Possible because it hasn't been sent yet.</span>` : ''}
+        ${!state.histRef && !canUndo ? `<button class="btn small" data-action="revert-commit" data-hash="${d.hash}" data-subject="${esc(subject)}" title="git revert — a new commit that does the opposite">↺ Reverse this commit…</button>` : ''}
+        ${canUndo ?`<button class="btn small" data-action="undo-commit" title="git reset --soft HEAD~1">↶ Undo this commit</button><span class="hint">Undo keeps your changes (they go back to the Changes tab). Possible because it hasn't been sent yet.</span>` : ''}
       </div>` : ''}
     </div>
     <div class="diff-scroll">${renderDiff(d.diff)}</div>`;
+}
+
+// Back out an older (or already sent) commit by adding one that does the opposite.
+async function revertCommit(repo, hash, subject) {
+  const st = state.status[repo] || {};
+  if (st.op) { toast('Finish or abort what is in progress first (see the yellow banner).', 'warn'); return; }
+  const isMerge = state.history?.commits.find((c) => c.hash === hash)?.parents.length > 1;
+  const dirty = changedFiles(st).length;
+  const ok = await confirmBox('Reverse this commit?', `<p>This adds a new commit to <b>${esc(st.branch || 'here')}</b> that does the exact opposite of “${esc(subject)}”. The original commit stays in the history, so this is safe even after it was sent to the server.</p>
+    ${isMerge ? `<p>This is a merge, so everything it brought in from the other branch is taken back out.</p>` : ''}
+    ${dirty ? `<p class="hint">Your ${plural(dirty, 'uncommitted change')} ${dirty === 1 ? 'is' : 'are'} left alone. If they're in the same files, git will ask you to commit them or put them on the Shelf first.</p>` : ''}
+    <p class="hint">If later commits changed the same lines, I'll walk you through it, and you can abort.</p>`, '↺ Reverse it');
+  if (!ok) return;
+  try {
+    const before = await gitRaw('headOid', repo).catch(() => null);
+    const r = await busy(repo, 'Reversing…', () => git('revertCommit', repo, hash));
+    if (await afterMaybeConflict(repo, r, null)) offerUndoMove(repo, before, `Reversed “${subject}”. Send it to share the fix.`, 'reverse');
+    if (state.tab === 'history') loadHistory();
+  } catch (e) { showError("Couldn't reverse the commit", e); }
+}
+
+// ---------- compare two branches ----------
+// state.cmp: { base, head, mode: 'split'|'exact', data, sel } — what `head` has compared with `base`.
+async function loadCompare() {
+  const repo = currentRepo();
+  const c = (state.cmp ||= { base: null, head: null, mode: 'split', data: null, sel: null });
+  const token = {};
+  c.token = token;
+  if (!state.branches || state.branches.error) state.branches = await gitRaw('branches', repo).catch(() => null);
+  if (!c.head) c.head = state.status[repo]?.branch || state.branches?.local[0]?.name || null;
+  if (!c.base) {
+    const def = await gitRaw('defaultBranch', repo).catch(() => null);
+    c.base = def && def !== c.head ? def : state.branches?.local.find((x) => x.name !== c.head)?.name || null;
+  }
+  let data;
+  if (!c.base || !c.head || c.base === c.head) data = { same: true };
+  else {
+    try { data = await gitRaw('compare', repo, c.base, c.head, { mode: c.mode }); }
+    catch (e) { data = { error: e.message }; }
+  }
+  if (c.token !== token || !samePath(currentRepo(), repo)) return;
+  c.data = data;
+  if (data.files && !data.files.some((f) => f.path === c.sel)) c.sel = data.files[0]?.path || null;
+  if (state.tab === 'compare') renderCompareTab();
+}
+
+function showCompare(base, head) {
+  state.cmp = { base, head, mode: state.cmp?.mode || 'split', data: null, sel: null };
+  if (state.tab === 'compare') { renderCompareTab(); loadCompare(); } else setTab('compare');
+}
+
+function renderCompareTab() {
+  const body = $('#tab-body');
+  const c = state.cmp || {};
+  const b = state.branches && !state.branches.error ? state.branches : { local: [], remote: [] };
+  const opts = (sel) => {
+    const known = [...b.local.map((x) => x.name), ...b.remote.map((x) => x.name)];
+    return `${sel && !known.includes(sel) ? `<option selected>${esc(sel)}</option>` : ''}
+      ${b.local.length ? `<optgroup label="On your computer">${b.local.map((x) => `<option value="${esc(x.name)}" ${x.name === sel ? 'selected' : ''}>${esc(x.name)}${x.current ? ' (current)' : ''}</option>`).join('')}</optgroup>` : ''}
+      ${b.remote.length ? `<optgroup label="On the server">${b.remote.map((x) => `<option value="${esc(x.name)}" ${x.name === sel ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</optgroup>` : ''}`;
+  };
+  const exact = c.mode === 'exact';
+  const head = esc(c.head || '…');
+  const base = esc(c.base || '…');
+  const toolbar = `<div class="toolbar wrap">
+      <span class="muted">What</span><select id="cmp-head" class="ref-select" aria-label="Branch to look at">${opts(c.head)}</select>
+      <span class="muted">has, compared with</span><select id="cmp-base" class="ref-select" aria-label="Branch to compare with">${opts(c.base)}</select>
+      <button class="btn small ghost" data-action="cmp-swap" title="Swap the two branches">⇄ Swap</button>
+      <div class="seg small" role="group" aria-label="What to compare">
+        <button class="seg-btn ${exact ? '' : 'active'}" data-action="cmp-range" data-mode="split" title="Only what changed on ${head} since it split from ${base}: what a pull request would show">Since they split</button>
+        <button class="seg-btn ${exact ? 'active' : ''}" data-action="cmp-range" data-mode="exact" title="Every difference between the two branches as they are now">Exact difference</button>
+      </div>
+    </div>
+    <div class="explain">${exact
+      ? `Every difference between <b>${base}</b> and <b>${head}</b> right now: what would change in your folder if you switched from ${base} to ${head}.`
+      : `The changes made on <b>${head}</b> since it split from <b>${base}</b>: what a pull request from ${head} into ${base} would contain.`}</div>`;
+  const bind = () => {
+    $('#cmp-head').addEventListener('change', (e) => showCompare(c.base, e.target.value));
+    $('#cmp-base').addEventListener('change', (e) => showCompare(e.target.value, c.head));
+  };
+  const d = c.data;
+  if (!d) { body.innerHTML = toolbar + '<div class="empty muted"><span class="spinner"></span> Loading…</div>'; bind(); return; }
+  if (d.same) { body.innerHTML = toolbar + '<div class="empty muted">Pick two different branches to compare.</div>'; bind(); return; }
+  if (d.error) { body.innerHTML = toolbar + `<pre class="raw">${esc(d.error)}</pre>`; bind(); return; }
+  const commits = d.commits.map((x) => `<div class="commit cmp-commit"><div class="commit-subject">${esc(x.subject)}</div>
+      <div class="commit-meta">${esc(x.author)} · ${timeAgo(x.date)} · <span class="mono">${x.short}</span></div></div>`).join('');
+  const files = d.files.map((f) => {
+    const slash = f.path.lastIndexOf('/');
+    const stat = f.add == null ? '<span class="muted">binary</span>' : `<span class="st-add">+${f.add}</span> <span class="st-del">−${f.del}</span>`;
+    return `<div class="file ${f.path === c.sel ? 'selected' : ''}" data-action="cmp-file" data-path="${esc(f.path)}">
+      <span class="code c-${f.code}" title="${CODE_LABEL[f.code] || f.code}">${f.code}</span>
+      <span class="fname" title="${esc(f.orig ? `${f.orig} → ${f.path}` : f.path)}"><b>${esc(f.path.slice(slash + 1))}</b> <span class="muted">${esc(slash >= 0 ? f.path.slice(0, slash + 1) : '')}</span></span>
+      <span class="cmp-stat">${stat}</span></div>`;
+  }).join('');
+  body.innerHTML = `${toolbar}<div class="split">
+    <div class="pane-left scroll">
+      <div class="cmp-sum"><b>${plural(d.onlyHead, 'commit')}</b> on ${head} that ${base} doesn't have · <b>${plural(d.onlyBase, 'commit')}</b> the other way</div>
+      ${d.commits.length ? `<details class="cmp-commits"><summary>Commits on ${head} only (${d.onlyHead})</summary>${commits}${d.onlyHead > d.commits.length ? `<div class="muted pad small">…and ${d.onlyHead - d.commits.length} older ones.</div>` : ''}</details>` : ''}
+      <div class="list-head"><span>${d.files.length ? plural(d.files.length, 'changed file') : 'No file differences'}</span></div>
+      ${files || `<div class="empty muted">${exact ? 'The two branches have exactly the same files.' : `Nothing has changed on ${head} since it split from ${base}.`}</div>`}
+    </div>
+    <div class="pane-right" id="cmp-diff"></div>
+  </div>`;
+  bind();
+  loadCompareDiff();
+}
+
+async function loadCompareDiff() {
+  const repo = currentRepo();
+  const c = state.cmp;
+  const pane = $('#cmp-diff');
+  if (!pane || !c?.data?.files) return;
+  const f = c.data.files.find((x) => x.path === c.sel);
+  if (!f) { pane.innerHTML = '<div class="empty muted">Select a file to see what changed.</div>'; return; }
+  const token = {};
+  c.diffToken = token;
+  let d;
+  try { d = await gitRaw('compareDiff', repo, c.base, c.head, f.orig ? [f.orig, f.path] : [f.path], { mode: c.mode }); }
+  catch (e) { d = { kind: 'error', text: e.message }; }
+  if (c.diffToken !== token || !$('#cmp-diff')) return;
+  pane.innerHTML = `<div class="diff-head">
+      <b>${esc(f.path)}</b>${f.orig ? ` <span class="muted">(was ${esc(f.orig)})</span>` : ''}
+      <span class="tag c-${f.code}">${CODE_LABEL[f.code] || f.code}</span>
+      <div class="spacer"></div>
+      ${diffModeToggle()}
+    </div>
+    <div class="diff-scroll">${diffBody(d, f.path)}</div>`;
 }
 
 // ---------- shelf (stash) ----------
@@ -2222,6 +2524,8 @@ function openMenu(anchor, repo) {
     ${item('open-terminal', 'Open a terminal here')}
     ${st.hasRemote ? item('open-web', 'Open the repo website') : ''}
     ${st.upstream && st.branch ? item('open-pr', `Open a pull request for ${esc(st.branch)}`) : ''}
+    ${st.branch ? item('update-from', `Update ${esc(st.branch)} from another branch…`) : ''}
+    ${item('compare', 'Compare branches')}
   </div>`, { width: 260, onOpen: (el) => el.querySelector('button')?.focus() });
 }
 
@@ -2240,7 +2544,7 @@ async function openBranchSwitcher(anchor, repo) {
   };
   popover(anchor, `<input class="switcher-input" placeholder="Find a branch…" spellcheck="false" aria-label="Find a branch">
     <div class="switcher-list" role="listbox">${render('')}</div>
-    <div class="switcher-foot"><button class="btn small" data-action="new-branch" data-repo="${esc(repo)}">＋ New branch…</button><button class="btn small ghost" data-action="tab" data-tab="branches">All branches…</button></div>`, {
+    <div class="switcher-foot"><button class="btn small" data-action="new-branch" data-repo="${esc(repo)}">＋ New branch…</button>${st.branch ? `<button class="btn small ghost" data-action="update-from" data-repo="${esc(repo)}" title="Bring in the new commits from another branch">⤓ Update from…</button>` : ''}<button class="btn small ghost" data-action="tab" data-tab="branches">All branches…</button></div>`, {
     width: 320,
     onOpen: (el) => {
       const input = el.querySelector('input');
@@ -2278,12 +2582,14 @@ function paletteCommands() {
     a('Send / publish', 'push');
     a('Check for updates', 'fetch');
     a('New branch…', 'new-branch');
+    if (st.branch) a(`Update ${st.branch} from another branch…`, 'update-from');
+    a('Compare branches', 'compare');
     a('Put changes on the Shelf…', 'shelve');
     a('Tidy up branches…', 'tidy');
     a('Open in editor', 'open-editor');
     a('Open terminal', 'open-terminal');
     if (st.upstream) a('Open pull request', 'open-pr');
-    for (const t of ['changes', 'branches', 'history', 'shelf']) cmds.push({ label: `Go to ${t[0].toUpperCase() + t.slice(1)}`, hint: here, run: () => setTab(t) });
+    for (const t of ['changes', 'branches', 'history', 'compare', 'shelf']) cmds.push({ label: `Go to ${t[0].toUpperCase() + t.slice(1)}`, hint: here, run: () => setTab(t) });
     for (const b of state.branches?.local || []) if (!b.current) cmds.push({ label: `Switch to ${b.name}`, hint: `${here} · branch`, run: () => switchBranch(repo, b.name) });
   }
   if (state.view.type === 'workspace') {
@@ -2785,9 +3091,16 @@ const actions = {
     saveConfig();
     if (state.tab === 'changes') refreshDiff();
     else if (state.tab === 'history') loadCommitDetails();
+    else if (state.tab === 'compare') loadCompareDiff();
     else if (state.tab === 'shelf') loadStashPreview();
   },
   'file-history': (t, e) => { e?.stopPropagation(); showFileHistory(t.dataset.path); },
+  'update-from': (t) => { closePopover(); updateFrom(t.dataset.repo || currentRepo()); },
+  compare: (t) => { closePopover(); const repo = t.dataset.repo || currentRepo(); if (!samePath(repo, currentRepo())) openRepo(repo, state.view.ws, 'compare'); else setTab('compare'); },
+  'revert-commit': (t) => revertCommit(currentRepo(), t.dataset.hash, t.dataset.subject),
+  'cmp-swap': () => { const c = state.cmp; if (c) showCompare(c.head, c.base); },
+  'cmp-range': (t) => { const c = state.cmp; if (!c || c.mode === t.dataset.mode) return; c.mode = t.dataset.mode; c.data = null; renderCompareTab(); loadCompare(); },
+  'cmp-file': (t) => { state.cmp.sel = t.dataset.path; document.querySelectorAll('#tab-body .file').forEach((f) => f.classList.toggle('selected', f === t)); loadCompareDiff(); },
   'clear-file-history': () => { state.histFile = null; state.history = null; renderHistoryTab(); loadHistory(); },
   'open-menu': (t) => (popoverEl ? closePopover() : openMenu(t, t.dataset.repo)),
   'branch-switcher': (t) => (popoverEl ? closePopover() : openBranchSwitcher(t, t.dataset.repo)),
@@ -2860,8 +3173,24 @@ const actions = {
   pull: (t) => doPull(t.dataset.repo),
   push: (t) => doPush(t.dataset.repo),
   'select-file': (t) => { state.selected[currentRepo()] = t.dataset.path; document.querySelectorAll('#file-list .file').forEach((f) => f.classList.toggle('selected', f === t)); refreshDiff(); },
-  'check-file': (t, e) => { e.stopPropagation(); state.checked[currentRepo()][t.dataset.path] = t.checked; renderFileList(); },
-  'check-all': (t) => { const c = state.checked[currentRepo()]; for (const k of Object.keys(c)) c[k] = t.checked; renderFileList(); },
+  // A file's own tick box always means the whole file, so it clears any line choices.
+  'check-file': (t, e) => {
+    e.stopPropagation();
+    const repo = currentRepo();
+    const whole = partlyPicked(repo, t.dataset.path) || t.checked;
+    clearPicks(repo, t.dataset.path);
+    state.checked[repo][t.dataset.path] = whole;
+    afterPick();
+  },
+  'check-all': (t) => { const repo = currentRepo(); const c = state.checked[repo]; for (const k of Object.keys(c)) c[k] = t.checked; clearPicks(repo); afterPick(); },
+  'pick-line': (t) => { const k = state.diffKeys; if (k) { pickLines(k.repo, k.path, [t.dataset.key], t.checked); afterPick(); } },
+  'pick-hunk': (t) => {
+    const k = state.diffKeys;
+    if (!k) return;
+    const keys = [...document.querySelectorAll(`#diff-pane .dl[data-h="${t.dataset.h}"] [data-action=pick-line]`)].map((b) => b.dataset.key);
+    pickLines(k.repo, k.path, keys, t.checked);
+    afterPick();
+  },
   commit: () => doCommit(currentRepo(), false),
   'commit-push': () => doCommit(currentRepo(), true),
   'discard-file': (t, e) => { e.stopPropagation(); discard(currentRepo(), [t.dataset.path]); },
@@ -3072,7 +3401,14 @@ async function init() {
     document.querySelectorAll('.busy').forEach((b) => b.remove());
     onStatusChanged([p.key]);
   });
-  api.onRepoChanged(async (repo) => { if (await refreshRepo(repo)) onStatusChanged([repo]); });
+  api.onRepoChanged(async (repo) => {
+    if (await refreshRepo(repo)) onStatusChanged([repo]);
+    // Status doesn't cover branches or stashes made elsewhere (e.g. `git branch foo`), so reload the open list.
+    else if (state.view.type === 'repo' && samePath(repo, state.view.path)) {
+      if (state.tab === 'branches') loadBranches();
+      else if (state.tab === 'shelf') loadShelf();
+    }
+  });
   api.onUpdate((u) => toast(`RepoDeck ${u.version} is ready to install.`, 'info', { label: 'Restart now', fn: () => api.restartToUpdate() }));
   await loadChats();
   if (state.config.settings.claudeOpen) toggleClaude(true);

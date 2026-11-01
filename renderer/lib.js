@@ -310,6 +310,80 @@ function pairHunk(rows) {
   return out;
 }
 
+// ---------- committing some lines of a file ----------
+// Names the changed lines of a diff, in order: the line's text plus how many identical changed
+// lines came before it. Unlike a line number, the key survives edits elsewhere in the file.
+function lineKeyer() {
+  const seen = new Map();
+  return (kind, text) => {
+    const k = (kind === 'add' ? '+' : '-') + text;
+    const i = seen.get(k) || 0;
+    seen.set(k, i + 1);
+    return `${k}#${i}`;
+  };
+}
+
+// Every changed line of a diff: [{ kind: 'add'|'del', text, key }].
+function changedLines(diffText) {
+  const key = lineKeyer();
+  return parseUnified(diffText).flatMap((f) => f.hunks.flatMap((h) => h.rows))
+    .filter((r) => r.kind !== 'ctx').map((r) => ({ kind: r.kind, text: r.text, key: key(r.kind, r.text) }));
+}
+
+// A patch holding only some of a file's changed lines, for `git apply --cached`.
+// `excluded` lists line keys (see lineKeyer) to leave out: a left-out removal stays as
+// context and a left-out addition is dropped. Returns null when no change is left.
+function partialPatch(diffText, excluded) {
+  const skip = new Set(excluded);
+  const key = lineKeyer();
+  const lines = String(diffText || '').split('\n');
+  if (lines[lines.length - 1] === '') lines.pop();
+  const out = [];
+  let hunk = null;
+  let delta = 0; // how far new-side line numbers have moved from the hunks written so far
+  let any = false;
+  let kept = true;
+  const flush = () => {
+    if (!hunk || !hunk.changed) { hunk = null; return; }
+    const oldFirst = hunk.oldCount ? hunk.oldStart : hunk.oldStart + 1;
+    const newStart = oldFirst + delta - (hunk.newCount ? 0 : 1);
+    out.push(`@@ -${hunk.oldStart},${hunk.oldCount} +${newStart},${hunk.newCount} @@${hunk.ctx}`, ...hunk.body);
+    delta += hunk.newCount - hunk.oldCount;
+    any = true;
+    hunk = null;
+  };
+  for (const raw of lines) {
+    const line = raw.replace(/\r$/, '');
+    if (line.startsWith('@@')) {
+      flush();
+      const m = line.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,\d+)? @@(.*)$/);
+      if (!m) return null;
+      hunk ={ oldStart: +m[1], ctx: m[4], oldCount: 0, newCount: 0, body: [], changed: false };
+      continue;
+    }
+    if (!hunk) { out.push(raw); continue; } // file header (diff --git, index, ---, +++)
+    if (line.startsWith('\\')) { if (kept) hunk.body.push(raw); continue; }
+    const text = line.slice(1);
+    if (line.startsWith('+')) {
+      kept = !skip.has(key('add', text));
+      if (kept) { hunk.body.push(raw); hunk.newCount++; hunk.changed = true; }
+    } else if (line.startsWith('-')) {
+      const leave = skip.has(key('del', text));
+      kept = true;
+      hunk.body.push(leave ? ' ' + raw.slice(1) : raw);
+      hunk.oldCount++;
+      if (leave) hunk.newCount++; else hunk.changed = true;
+    } else {
+      kept = true;
+      hunk.body.push(raw);
+      hunk.oldCount++;
+      hunk.newCount++;
+    }
+  }
+  flush();
+  return any ? out.join('\n') + '\n' : null;
+}
+
 // ---------- commit graph ----------
 // For each commit (newest first), which lane it sits in and how lanes connect to the rows around it.
 function graphRows(commits) {
@@ -360,5 +434,5 @@ function fuzzyScore(query, text) {
 
 if (typeof module !== 'undefined') {
   module.exports = { esc, basename, norm, samePath, plural, timeAgo, parseConflicts, pickLines, myers, diffLines, sideBySide, inlineDiff, toLines, md,
-    langOf, tokenize, highlight, changeRange, parseUnified, pairHunk, graphRows, fuzzyScore };
+    langOf, tokenize, highlight, changeRange, parseUnified, pairHunk, lineKeyer, changedLines, partialPatch, graphRows, fuzzyScore };
 }

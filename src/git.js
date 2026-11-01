@@ -5,6 +5,7 @@ const { execFile } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { partialPatch } = require('../renderer/lib');
 
 const ENV = {
   ...process.env,
@@ -234,10 +235,22 @@ const ops = {
   },
 
   // amend: fold the changes into the last commit (and replace its message) instead of making a new one.
-  async commit(repo, { message, paths, all, amend = false }) {
+  // partial: { file: [lineKey…] } — for these files, commit everything except the listed lines.
+  async commit(repo, { message, paths, all, amend = false, partial = null }) {
     const st = await ops.status(repo);
     if (st.conflicted.length) throw new GitError('You have unresolved conflicts. Resolve them first.', 'CONFLICTS');
     const amendArg = amend ? ['--amend'] : [];
+    if (partial && Object.keys(partial).length) {
+      if (st.op || st.initial) throw new GitError('Picking single lines only works on a normal commit (not during a merge, or before the first commit).');
+      const patches = await partialPatches(repo, partial);
+      const whole = paths.filter((p) => !(p in partial));
+      // Build the commit in git's index: start from the last commit, add the whole files, then the picked lines.
+      await must(repo, ['reset', '-q']);
+      if (whole.length) await must(repo, ['add', '-A', '--pathspec-from-file=-', '--pathspec-file-nul'], { input: whole.map(lit).join('\0') });
+      for (const p of patches) await must(repo, ['apply', '--cached', '--whitespace=nowarn', '-'], { input: p });
+      await must(repo, ['commit', ...amendArg, '-m', message]);
+      return true;
+    }
     if (all || st.op) {
       await must(repo, ['add', '-A']);
       await must(repo, ['commit', ...amendArg, '-m', message]);
@@ -419,6 +432,66 @@ const ops = {
 
   async merge(repo, branch) {
     return withConflicts(repo, await run(repo, ['merge', '--no-edit', '--autostash', branch]));
+  },
+
+  // How the current branch and `ref` differ: commits only on `ref` (behind) and only here (ahead).
+  // A rebase rewrites the "ahead" commits, so it's unsafe once any of them is on the server.
+  async compareCounts(repo, ref) {
+    const r = await must(repo, ['rev-list', '--left-right', '--count', `HEAD...${ref}`], { quiet: true });
+    const [ahead, behind] = r.stdout.trim().split(/\s+/).map(Number);
+    const notSent = await run(repo, ['rev-list', '--count', 'HEAD', `^${ref}`, '^@{u}'], { quiet: true });
+    const sent = notSent.ok ? ahead - Number(notSent.stdout.trim()) : 0;
+    return { ahead, behind, sent, canRebase: sent === 0 };
+  },
+
+  // Bring another branch's new commits into the current one, by merge or by rebase.
+  async updateFrom(repo, ref, mode = 'merge') {
+    const args = mode === 'rebase' ? ['rebase', '--autostash', ref] : ['merge', '--no-edit', '--autostash', ref];
+    return withConflicts(repo, await run(repo, args));
+  },
+
+  // A new commit that does the opposite of `hash`. Merge commits are reversed against their first parent.
+  async revertCommit(repo, hash) {
+    const merge = (await run(repo, ['rev-list', '--no-walk', '--min-parents=2', hash], { quiet: true })).stdout.trim();
+    return withConflicts(repo, await run(repo, ['revert', '--no-edit', ...(merge ? ['-m', '1'] : []), hash]));
+  },
+
+  // What `head` changes compared with `base`. mode 'split': only what happened on head since the
+  // two branches split (what a pull request shows); 'exact': every difference between them.
+  async compare(repo, base, head, { mode = 'split' } = {}) {
+    const range = mode === 'exact' ? [base, head] : [`${base}...${head}`];
+    const ns = await must(repo, ['diff', '--name-status', '-z', '-M', ...range], { quiet: true });
+    const files = [];
+    const parts = ns.stdout.split('\0');
+    for (let i = 0; i < parts.length - 1;) {
+      const code = parts[i++][0];
+      if (code === 'R' || code === 'C') files.push({ code, orig: parts[i++], path: parts[i++] });
+      else files.push({ code, path: parts[i++] });
+    }
+    const stats = new Map();
+    const num = (await run(repo, ['diff', '--numstat', '-z', '-M', ...range], { quiet: true })).stdout.split('\0');
+    for (let i = 0; i < num.length - 1;) {
+      const m = num[i++].match(/^(\d+|-)\t(\d+|-)\t(.*)$/);
+      if (!m) continue;
+      const file = m[3] || (i++, num[i++]); // renames list the old and new names after the counts
+      stats.set(file, { add: m[1] === '-' ? null : +m[1], del: m[2] === '-' ? null : +m[2] });
+    }
+    for (const f of files) Object.assign(f, stats.get(f.path) || {});
+    const fmt = '%H%x1f%h%x1f%an%x1f%at%x1f%s%x1e';
+    const log = (await run(repo, ['log', '-n300', `--format=${fmt}`, `${base}..${head}`], { quiet: true })).stdout;
+    const commits = log.split('\x1e').map((s) => s.trim()).filter(Boolean).map((rec) => {
+      const [hash, short, author, date, subject] = rec.split('\x1f');
+      return { hash, short, author, date: +date, subject };
+    });
+    const counts = (await must(repo, ['rev-list', '--left-right', '--count', `${base}...${head}`], { quiet: true })).stdout.trim().split(/\s+/).map(Number);
+    return { files, commits, onlyBase: counts[0], onlyHead: counts[1] };
+  },
+
+  async compareDiff(repo, base, head, files, { mode = 'split' } = {}) {
+    const range = mode === 'exact' ? [base, head] : [`${base}...${head}`];
+    const r = await must(repo, ['diff', '-M', ...range, '--', ...files.map(lit)], { quiet: true });
+    if (/^Binary files /m.test(r.stdout) && !/^@@/m.test(r.stdout)) return { kind: 'binary' };
+    return { kind: 'text', text: r.stdout };
   },
 
   async fetch(repo, { background = false } = {}) {
@@ -664,6 +737,17 @@ const ops = {
 // offer restoring them when you come back to the branch.
 const autoShelfMessage = (from, to) => `[auto] ${from}: left behind when switching to ${to}`;
 
+// One patch per partly-ticked file, made from a fresh diff so it matches the files on disk.
+async function partialPatches(repo, partial) {
+  const patches = [];
+  for (const [file, excluded] of Object.entries(partial)) {
+    const d = await must(repo, ['diff', 'HEAD', '--', lit(file)], { quiet: true });
+    const p = partialPatch(d.stdout, excluded);
+    if (p) patches.push(p);
+  }
+  return patches;
+}
+
 async function cherryPickArgs(repo, hashes, x) {
   // Merge commits need "-m 1" (copy the changes relative to their first parent).
   const merges = (await run(repo, ['rev-list', '--no-walk', '--min-parents=2', ...hashes], { quiet: true })).stdout.trim();
@@ -679,10 +763,20 @@ const firstLine = (m) => (m.includes('\n') ? m.split('\n')[0] + ' …' : m);
 const OP_CMD = { merge: 'merge', rebase: 'rebase', 'cherry-pick': 'cherry-pick', revert: 'revert' };
 
 const plans = {
-  async commit(repo, { message, paths, all, amend = false }) {
+  async commit(repo, { message, paths, all, amend = false, partial = null }) {
     const st = await ops.status(repo);
     const a = amend ? ['--amend'] : [];
     const what = amend ? 'Add to your last commit and replace its message (instead of making a new commit).' : 'Save a snapshot with your message. It stays on your computer until you Send.';
+    const some = Object.keys(partial || {});
+    if (some.length) {
+      const whole = paths.filter((p) => !some.includes(p));
+      return [
+        step(['reset', '-q'], 'Start the commit from your last commit. Your files on disk are not touched.'),
+        ...(whole.length ? [step(['add', '-A', '--', ...whole], 'Include the files you ticked completely.')] : []),
+        ...some.map((f) => step(['apply', '--cached', '-'], `Include only the lines you ticked in ${f}. The unticked lines stay as uncommitted changes.`)),
+        step(['commit', ...a, '-m', firstLine(message)], what),
+      ];
+    }
     if (all || st.op) {
       return [
         step(['add', '-A'], 'Include every changed, new and deleted file in the commit.'),
@@ -730,6 +824,13 @@ const plans = {
     ...(remote ? [step(['push', remote.remote, '--delete', remote.branch], 'Also delete it on the server.')] : []),
   ],
   merge: (repo, branch) => [step(['merge', '--no-edit', '--autostash', branch], `Copy the commits from ${branch} into your current branch. If the same lines changed on both, you'll be asked to resolve conflicts.`)],
+  updateFrom: (repo, ref, mode = 'merge') => [mode === 'rebase'
+    ? step(['rebase', '--autostash', ref], `Replay your commits on top of the latest ${ref}, as if you had started from there. Gives a straight history; your commits get new IDs.`)
+    : step(['merge', '--no-edit', '--autostash', ref], `Bring ${ref}'s new commits into your branch with a merge commit. Nothing that's already there is rewritten.`)],
+  async revertCommit(repo, hash) {
+    const merge = (await run(repo, ['rev-list', '--no-walk', '--min-parents=2', hash], { quiet: true })).stdout.trim();
+    return [step(['revert', '--no-edit', ...(merge ? ['-m', '1'] : []), hash.slice(0, 10)], 'Make a new commit that does the exact opposite of that one. The original commit stays in the history.')];
+  },
   undoLastCommit: () => [step(['reset', '--soft', 'HEAD~1'], 'Remove the last commit but keep all its changes in your folder, ready to commit again.')],
   stashSave: (repo, message) => [step(['stash', 'push', '--include-untracked', ...(message ? ['-m', message] : [])], 'Put all uncommitted changes (including new files) on the Shelf and make your folder match your last commit.')],
   stashApply: (repo, ref) => [step(['stash', 'apply', ref], 'Copy the changes from this Shelf item into your folder, keeping the item on the Shelf.')],

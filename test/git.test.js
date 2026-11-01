@@ -226,6 +226,122 @@ test('history of one file, tidy-up candidates and pull request links', async () 
   assert.match(await link('https://gitlab.com/acme/api.git'), /gitlab\.com\/acme\/api\/-\/merge_requests\/new/);
 });
 
+test('commit only some lines of a file', async () => {
+  const { changedLines } = require('../renderer/lib');
+  const a = sb.repo('partial');
+  sb.write(a, 'f.txt', 'one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\n');
+  sb.write(a, 'g.txt', 'g\n');
+  await ops.commit(a, { message: 'base', paths: [], all: true });
+  // Two separate blocks of changes in f.txt, plus a change in g.txt.
+  sb.write(a, 'f.txt', 'ONE\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nTEN\neleven\n');
+  sb.write(a, 'g.txt', 'g2\n');
+  const d = await ops.fileDiff(a, ['f.txt']);
+  const rows = changedLines(d.text);
+  // Leave out the second block (TEN + eleven), commit the first block and all of g.txt.
+  const excluded = rows.filter((r) => /TEN|ten|eleven/.test(r.text)).map((r) => r.key);
+  await ops.commit(a, { message: 'some lines', paths: ['f.txt', 'g.txt'], all: false, partial: { 'f.txt': excluded } });
+  assert.equal(sb.sh(a, 'show', 'HEAD:f.txt'), 'ONE\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\n');
+  assert.equal(sb.sh(a, 'show', 'HEAD:g.txt'), 'g2\n');
+  assert.equal(fs.readFileSync(path.join(a, 'f.txt'), 'utf8'), 'ONE\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nTEN\neleven\n', 'the file on disk is untouched');
+  const st = await ops.status(a);
+  assert.deepEqual(st.unstaged.map((f) => f.path), ['f.txt'], 'the left-out lines are still uncommitted');
+  assert.equal(st.staged.length, 0);
+
+  // Only an added line out of a replaced pair: keep "eleven" out, take TEN.
+  const d2 = await ops.fileDiff(a, ['f.txt']);
+  const rows2 = changedLines(d2.text);
+  await ops.commit(a, { message: 'TEN', paths: ['f.txt'], all: false, partial: { 'f.txt': rows2.filter((r) => r.text === 'eleven').map((r) => r.key) } });
+  assert.match(sb.sh(a, 'show', 'HEAD:f.txt'), /nine\nTEN\n$/);
+  const plan = await ops.plan('commit', a, { message: 'm', paths: ['f.txt'], all: false, partial: { 'f.txt': [] } });
+  assert.ok(plan.some((s) => /apply --cached/.test(s.cmd)));
+});
+
+test('update from another branch: merge, rebase, and the rebase safety check', async () => {
+  const srv = sb.server('update');
+  const a = sb.repo('update');
+  sb.write(a, 'base.txt', 'base\n');
+  await ops.commit(a, { message: 'base', paths: [], all: true });
+  await ops.createBranch(a, 'dev', null);
+  sb.write(a, 'dev.txt', 'dev\n');
+  await ops.commit(a, { message: 'on dev', paths: [], all: true });
+  await ops.switchBranch(a, 'main');
+  await ops.createBranch(a, 'feature', null);
+  sb.write(a, 'feature.txt', 'feature\n');
+  await ops.commit(a, { message: 'on feature', paths: [], all: true });
+
+  let c = await ops.compareCounts(a, 'dev');
+  assert.deepEqual([c.ahead, c.behind, c.canRebase], [1, 1, true]);
+  assert.ok((await ops.updateFrom(a, 'dev', 'rebase')).ok);
+  let h = await ops.history(a);
+  assert.deepEqual(h.commits.map((x) => x.subject), ['on feature', 'on dev', 'base'], 'rebase gives a straight line');
+
+  // Once feature is on the server, rebasing would rewrite sent commits.
+  await ops.addRemote(a, srv);
+  await ops.push(a);
+  await ops.switchBranch(a, 'dev');
+  sb.write(a, 'dev2.txt', 'dev2\n');
+  await ops.commit(a, { message: 'more dev', paths: [], all: true });
+  await ops.switchBranch(a, 'feature');
+  c = await ops.compareCounts(a, 'dev');
+  assert.equal(c.behind, 1);
+  assert.equal(c.canRebase, false);
+  sb.write(a, 'wip.txt', 'uncommitted\n');
+  assert.ok((await ops.updateFrom(a, 'dev', 'merge')).ok);
+  h = await ops.history(a);
+  assert.equal(h.commits[0].parents.length, 2, 'a merge commit');
+  assert.ok(fs.existsSync(path.join(a, 'wip.txt')), 'uncommitted work kept');
+});
+
+test('revert an older commit, including a clash', async () => {
+  const a = sb.repo('revert');
+  sb.write(a, 'f.txt', 'a\n');
+  await ops.commit(a, { message: 'one', paths: [], all: true });
+  sb.write(a, 'g.txt', 'g\n');
+  await ops.commit(a, { message: 'add g', paths: [], all: true });
+  const addG = await ops.headOid(a);
+  sb.write(a, 'f.txt', 'b\n');
+  await ops.commit(a, { message: 'f to b', paths: [], all: true });
+  const fToB = await ops.headOid(a);
+  sb.write(a, 'f.txt', 'c\n');
+  await ops.commit(a, { message: 'f to c', paths: [], all: true });
+
+  assert.ok((await ops.revertCommit(a, addG)).ok);
+  assert.ok(!fs.existsSync(path.join(a, 'g.txt')), 'the old commit is reversed');
+  assert.match((await ops.history(a)).commits[0].subject, /^Revert "add g"/);
+  assert.ok((await ops.revertCommit(a, fToB)).conflicts, 'a later commit changed the same line');
+  assert.equal((await ops.status(a)).op.kind, 'revert');
+  await ops.abortOp(a, 'revert');
+  assert.equal((await ops.status(a)).op, null);
+});
+
+test('compare two branches', async () => {
+  const a = sb.repo('compare');
+  sb.write(a, 'keep.txt', 'k\n');
+  sb.write(a, 'old name.txt', 'some text that is long enough\nto be seen as a rename\nby git\n');
+  await ops.commit(a, { message: 'base', paths: [], all: true });
+  await ops.createBranch(a, 'feature', null);
+  sb.write(a, 'keep.txt', 'k\nk2\n');
+  fs.renameSync(path.join(a, 'old name.txt'), path.join(a, 'new name.txt'));
+  sb.write(a, 'added.txt', 'new\n');
+  await ops.commit(a, { message: 'feature work', paths: [], all: true });
+  await ops.switchBranch(a, 'main');
+  sb.write(a, 'main-only.txt', 'm\n');
+  await ops.commit(a, { message: 'main work', paths: [], all: true });
+
+  const split = await ops.compare(a, 'main', 'feature');
+  assert.deepEqual([split.onlyBase, split.onlyHead], [1, 1]);
+  assert.deepEqual(split.commits.map((c) => c.subject), ['feature work']);
+  const byPath = Object.fromEntries(split.files.map((f) => [f.path, f]));
+  assert.deepEqual(Object.keys(byPath).sort(), ['added.txt', 'keep.txt', 'new name.txt'], 'main-only.txt is not part of feature\'s changes');
+  assert.equal(byPath['new name.txt'].code, 'R');
+  assert.equal(byPath['new name.txt'].orig, 'old name.txt');
+  assert.deepEqual([byPath['keep.txt'].add, byPath['keep.txt'].del], [1, 0]);
+  const exact = await ops.compare(a, 'main', 'feature', { mode: 'exact' });
+  assert.ok(exact.files.some((f) => f.path === 'main-only.txt' && f.code === 'D'), 'exact shows main-only.txt as missing on feature');
+  const d = await ops.compareDiff(a, 'main', 'feature', ['keep.txt']);
+  assert.match(d.text, /^\+k2$/m);
+});
+
 test('previews describe what will run', async () => {
   const a = sb.repo('plans');
   const commit = await ops.plan('commit', a, { message: 'msg\n\nbody', paths: ['x.txt'], all: false });
