@@ -23,6 +23,8 @@ Most git tools assume you already know git and that you work in one repo at a ti
 - **Open repo folder** (or drag folders onto the window), or clone one. Group related repos into **workspaces**.
 - The sidebar shows each repo's branch, uncommitted changes (●), commits to send (↑) and commits to get (↓).
 - **Workspace actions** run on every repo at once: check for updates, get latest, send, *New branch in all*, *Switch all to branch*, *Update all from…* (bring `dev` or any branch into every repo, with a per-repo preview of what's coming and one Undo for all of them), *Tidy up branches*, *Open all in VS Code*.
+- **Search every repo** from the workspace page: commits by message, author or hash (on any branch), and branches by name. Click a commit to open it in the History of the branch it's on.
+- When branches were deleted on the server (their pull requests completed), the workspace page offers to **finish them all** in one go.
 - If your repos are on different branches, a banner says so and offers **Line them up**.
 - Each repo opens in its own **tab**, and tabs are remembered between launches.
 
@@ -33,6 +35,8 @@ Most git tools assume you already know git and that you work in one repo at a ti
 - **Type buttons** (`feat`, `fix`, `docs`…) and an optional message template.
 - **Amend** the last commit, as long as it hasn't been sent.
 - **Commit only some lines.** Untick single lines, or a whole block, in the diff to leave them out. They stay in your folder as uncommitted changes. A file with some lines left out shows a half-ticked box.
+- **Discard a single block** (↺ on the block's header) instead of the whole file, with Undo. With only some files ticked, **Put ticked on Shelf** sets just those aside.
+- **Azure Boards work items:** the commit box has an *AB#* field, filled in from the number in the branch name (`feature/1234-login` → 1234). The commit message gets `AB#1234`, which links it to the work item.
 - Diffs have syntax colours and highlight the changed words, shown **inline** or **side by side**.
 
 ![Changes tab: ticked files, the commit box with type buttons and Write message, and a coloured diff](docs/screenshots/changes.png)
@@ -49,6 +53,8 @@ After a commit, merge, get latest, update from another branch, reversed commit, 
 
 - Click the branch name for a **quick switcher**: type to filter, then <kbd>Enter</kbd> to switch, or create a new branch.
 - Switching with uncommitted changes asks whether to **bring them along** or **leave them on the Shelf**. If you leave them, RepoDeck offers to put them back when you return.
+- **Finish branch.** When the server has deleted your branch (or its pull request is completed), a banner offers to switch to the main branch, get its latest and delete the branch here. It asks first if the branch's commits aren't in main as-is (normal after a squash merge), and Undo brings the branch back.
+- **Tags:** a Tags list with Send and Delete (Undo puts a deleted tag back exactly). Add one from any commit in History, as a plain label or a release with a message.
 - **Update from…** brings in the new commits from any branch you pick, such as `main`, `dev` or a teammate's branch, by **merge** or **rebase**. It shows how many commits you'll get and remembers your choice for each branch. Rebase is turned off once your commits are on the server, because it would rewrite them.
 - **Compare** two branches: what one has that the other doesn't, either *since they split* (what a pull request would show) or the *exact difference*. You get the commits, the changed files with line counts, and each file's diff.
 - **Tidy up** finds branches that are merged, or were deleted on the server after a pull request, and removes them in one go (with Undo).
@@ -59,6 +65,8 @@ After a commit, merge, get latest, update from another branch, reversed commit, 
 ### History and cherry-pick
 
 - A **commit graph**, **search** by message, author or hash, and **history of a single file**.
+- **Who changed each line** (blame) for a file, grouped by commit, with ✦ to ask Claude why those lines were changed. Also the *Blame* button in the Changes diff.
+- **Tidy unsent commits:** combine, reword or drop commits you haven't sent yet, before opening a pull request. Undo puts the old ones back.
 - **✦ Explain** asks Claude what a commit did and why.
 - **Reverse this commit** (`git revert`) backs out any earlier commit by adding one that does the opposite. It's safe even after the commit was sent, unlike Undo. Uncommitted edits in the same files are set aside and put back.
 - **Cherry-pick:** open any branch, tick commits, and copy them into your branch. Commits already there are hidden.
@@ -78,6 +86,13 @@ There's also **✦ Explain** (Claude describes the clash), a one-click **Open in
 | Step by step | Compare side by side |
 |---|---|
 | ![Conflict resolver with “Yours” and “Incoming” side by side](docs/screenshots/conflict-steps.png) | ![Whole-file comparison with differences highlighted](docs/screenshots/conflict-compare.png) |
+
+### Azure DevOps
+
+- The **Open pull request** link works with Azure DevOps remotes.
+- With a **personal access token** (Settings → Azure DevOps, permission *Code (Read)*), the repo header shows your branch's pull request: reviews (approved, changes asked, rejected) and build results. Hover to see each reviewer; click to open the PR. When the PR is completed, RepoDeck offers to finish the branch.
+- The token is encrypted with Windows' data protection and only used by the app's main process to call Azure DevOps.
+- **Work items:** see *Azure Boards work items* above.
 
 ### The Shelf (git stash)
 
@@ -148,13 +163,14 @@ Then click **📂 Open repo folder…** (or drag a folder onto the window). On f
 |---|---|
 | Theme | Follow Windows, Light or Dark |
 | Editor | Which editor *Open in…* uses: VS Code, Cursor, or any command |
-| Commits | A summary template (e.g. `ABC-123: `) and the quick type buttons |
+| Commits | A summary template (e.g. `ABC-123: `), the quick type buttons, and the Azure Boards work item box |
+| Azure DevOps | A personal access token for pull request status (stored encrypted) |
 | Preview commands | Always show git commands before running an action |
 | Cherry-pick note | Add “(cherry picked from commit …)” to cherry-picked commits |
 | Claude | Path to `claude.exe` (found automatically if empty) and model |
 | Automatic checking | How often to check servers for new commits |
 
-Settings and workspaces are stored in `%APPDATA%\repodeck\config.json`, and Claude chats in `chats.json` next to it.
+Settings and workspaces are stored in `%APPDATA%\repodeck\config.json`, Claude chats in `chats.json` next to it, and the encrypted Azure DevOps token in `secrets.json`.
 
 ## Keyboard shortcuts
 
@@ -176,6 +192,7 @@ npm start      # run the app
 npm test       # run the tests (git operations run against throwaway repos)
 npm run test:ui  # screen tests: opens the app on a throwaway repo, clicks through every tab
                  # at two window sizes and checks nothing spills out or gets cut off
+                 # (SHOTS=1 also saves pictures of the newer screens to test/ui/output)
 npm run check  # syntax-check every source file
 npm run dist   # build the Windows installer into dist/
 ```
@@ -190,6 +207,7 @@ RepoDeck is an [Electron](https://www.electronjs.org/) app with no build step an
 |---|---|
 | `main.js` | Electron main process: window, settings, folder watching, editor and terminal launching, updates |
 | `src/git.js` | Every git operation, with progress, cancel and plain-English previews |
+| `src/ado.js` | Azure DevOps pull request status (runs in the main process, which holds the token) |
 | `src/claude.js` | Runs Claude Code headless and routes its permission prompts to RepoDeck's approval cards |
 | `preload.js` | The bridge between the UI and the main process |
 | `renderer/app.js` | The UI |
