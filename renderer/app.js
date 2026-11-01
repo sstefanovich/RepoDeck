@@ -111,6 +111,7 @@ const state = {
   progress: {},       // repo (or 'clone') -> { text, percent } for long operations
   undos: [],          // recent actions that can be undone, newest first (see recordUndo)
   prStatus: {},       // norm(repo) -> pull request info from Azure DevOps, for the current branch
+  adoToken: false,    // an Azure DevOps token is saved (the token itself stays in the main process)
   workItem: {},       // "repo|branch" -> work item number typed in the commit box
   histFile: null,     // History: only commits touching this file
   histQuery: '',      // History: search text
@@ -707,6 +708,7 @@ function openRepo(repo, wsId, tab) {
   $('#view').innerHTML = '<div class="repo-view"><div id="repo-header" class="repo-header"></div><div id="op-banner"></div><div id="tabs" class="tabs"></div><div id="tab-body" class="tab-body"></div></div>';
   updateRepoChrome();
   renderTab();
+  loadPrStatus(repo);
 }
 
 function updateRepoChrome() {
@@ -728,6 +730,7 @@ function updateRepoView() {
   else if (state.tab === 'branches' && headChanged) loadBranches();
   else if (state.tab === 'history' && headChanged) loadHistory();
   else if (state.tab === 'compare' && headChanged) loadCompare();
+  if (headChanged) loadPrStatus(currentRepo());
   else if (state.tab === 'shelf') loadShelf();
 }
 
@@ -753,9 +756,10 @@ function repoHeaderHtml(repo) {
     <div class="rh-bar">
       <button class="branch-pill" data-action="branch-switcher" data-repo="${esc(repo)}" title="Switch to another branch, or create one" aria-haspopup="dialog">⎇ <b>${esc(branchLabel)}</b> <span class="pill-action">Switch branch ▾</span></button>
       <div class="sync-text" title="${esc(sync.replace(/<[^>]+>/g, ''))}">${sync}${checked ? ` <span class="muted small">(${checked})</span>` : ''}</div>
+      ${prChipHtml(repo)}
       <div class="spacer"></div>
       ${busyHtml(repo)}
-      ${prable ? `<button class="btn ghost" data-action="open-pr" data-repo="${esc(repo)}" title="Open the page for a pull request from ${esc(st.branch)}">⇄ Pull request</button>` : ''}
+      ${prable && state.prStatus[norm(repo)]?.status !== 'active' ?`<button class="btn ghost" data-action="open-pr" data-repo="${esc(repo)}" title="Open the page for a pull request from ${esc(st.branch)}">⇄ Pull request</button>` : ''}
       ${noServer ? '' : `<button class="btn" data-action="fetch" data-repo="${esc(repo)}" ${d} title="git fetch — asks the server what's new. Doesn't change any of your files.">⟳ Check for updates</button>
       <button class="btn ${st.behind ? 'primary' : ''}" data-action="pull" data-repo="${esc(repo)}" ${d} title="git pull — downloads new commits from the server into this branch">↓ Get latest${st.behind ? ` (${st.behind})` : ''}</button>`}
       ${pushBtn}
@@ -1217,6 +1221,7 @@ async function doFetch(repo, { silent = false } = {}) {
     const st = state.status[repo];
     if (!silent) toast(st.behind ? `${plural(st.behind, 'new commit')} on the server for ${st.branch}.` : `${basename(repo)}: nothing new on the server.`, st.behind ? 'info' : 'ok');
     if (state.tab === 'branches' && samePath(repo, currentRepo())) loadBranches();
+    loadPrStatus(repo, true);
   } catch (e) { if (!silent) showError("Couldn't check for updates", e); else throw e; }
 }
 
@@ -1257,6 +1262,7 @@ async function doPush(repo) {
       }
       return false;
     }
+    loadPrStatus(repo, true);
     const msg = r.published ? 'Branch published to the server.' : 'Sent to the server.';
     // The natural next step after sending a feature branch is a pull request.
     if (r.branch && !['main', 'master', 'develop'].includes(r.branch)) {
@@ -1951,6 +1957,47 @@ async function loadCommitDetails() {
       </div>` : ''}
     </div>
     <div class="diff-scroll">${renderDiff(d.diff)}</div>`;
+}
+
+// ---------- Azure DevOps pull request status ----------
+// Fetched by the main process (which holds the token); refreshed at most every 5 minutes per branch
+// unless `force` (after Check for updates or Send).
+const prLoaded = {}; // norm(repo) -> { branch, time }
+async function loadPrStatus(repo, force = false) {
+  const st = state.status[repo] || {};
+  if (!state.adoToken || !repo || !st.branch || !st.hasRemote) return;
+  const k = norm(repo);
+  const last = prLoaded[k];
+  if (!force && last && last.branch === st.branch && Date.now() - last.time < 5 * 60000) return;
+  prLoaded[k] = { branch: st.branch, time: Date.now() };
+  const r = await api.ado.prStatus(repo, st.branch);
+  const data = r.ok ? r.data : { error: r.error, code: r.code };
+  if (data.supported === false || data.noToken) delete state.prStatus[k];
+  else state.prStatus[k] = { ...data, branch: st.branch };
+  if (samePath(repo, currentRepo()) && $('#repo-header')) updateRepoChrome();
+}
+
+function prChipHtml(repo) {
+  const st = state.status[repo] || {};
+  const pr = state.prStatus[norm(repo)];
+  if (!pr || pr.branch !== st.branch || pr.none) return '';
+  if (pr.error) return `<span class="pr-chip muted" title="${esc(pr.error)}">PR status unavailable</span>`;
+  const open = (label, cls, tip) => `<button class="pr-chip ${cls}" data-action="open-pr-web" data-url="${esc(pr.url)}" title="${esc(tip)}">${label}</button>`;
+  if (pr.status === 'completed') return open(`PR #${pr.id} completed ✓`, 'ok', `${pr.title} — merged into ${pr.target}`);
+  if (pr.status === 'abandoned') return open(`PR #${pr.id} abandoned`, 'muted', pr.title);
+  const bits = [];
+  if (pr.rejected) bits.push('✕ rejected');
+  else if (pr.waiting) bits.push('↺ changes asked');
+  else if (pr.approved) bits.push(`✓ ${pr.approved} approved`);
+  else bits.push('waiting for review');
+  const b = pr.checks?.builds;
+  if (b?.failed) bits.push('✕ build failed');
+  else if (b?.running) bits.push('⏳ build running');
+  else if (b?.total && b.passed === b.total) bits.push('✓ build passed');
+  const bad = pr.rejected || b?.failed;
+  const good = !bad && pr.approved && pr.checks && !pr.checks.blocking;
+  const reviewers = pr.reviewers.map((r) => `${r.name}: ${r.vote >= 10 ? 'approved' : r.vote >= 5 ? 'approved with suggestions' : r.vote === -5 ? 'waiting for author' : r.vote === -10 ? 'rejected' : 'no vote yet'}`).join('\n');
+  return open(`PR #${pr.id}${pr.draft ? ' (draft)' : ''} · ${bits.join(' · ')}`, bad ? 'bad' : good ? 'ok' : '', `${pr.title} → ${pr.target}${reviewers ? `\n\n${reviewers}` : ''}${good ? '\n\nReady to complete.' : ''}`);
 }
 
 // ---------- tags ----------
@@ -2892,6 +2939,10 @@ async function openSettings() {
       <label class="field"><span>Start every commit summary with (optional)</span><input name="commitTemplate" value="${esc(s.commitTemplate || '')}" placeholder="e.g. ABC-123: "></label>
       <label class="field"><span>Quick type buttons above the summary (space-separated; empty to hide)</span><input name="commitPrefixes" value="${esc(s.commitPrefixes ?? 'feat fix docs refactor test chore')}"></label>
       <label class="check"><input type="checkbox" name="workItems" ${s.workItems !== false ? 'checked' : ''}> Show a work item box (AB#) for Azure Boards, filled in from the branch name (e.g. feature/1234-login)</label>
+      <h3>Azure DevOps</h3>
+      <p class="hint">With a personal access token, repos on Azure DevOps show their pull request's reviews and build next to the branch. Create one in Azure DevOps under <b>User settings → Personal access tokens</b> with the <b>Code (Read)</b> permission. It's stored encrypted on this computer and only sent to Azure DevOps.</p>
+      <label class="field"><span>Personal access token</span><input name="adoToken" type="password" autocomplete="off" placeholder="${state.adoToken ? 'Saved — type a new one to replace it' : 'Paste your token'}"></label>
+      ${state.adoToken ? '<label class="check"><input type="checkbox" name="adoForget"> Forget the saved token</label>' : ''}
       <h3>Seeing what happens</h3>
       <label class="check"><input type="checkbox" name="preview" ${s.previewCommands ? 'checked' : ''}> Show me the git commands before running any action</label>
       <p class="hint">You can always hold <b>Shift</b> while clicking a button to preview just that one action.</p>
@@ -2913,6 +2964,14 @@ async function openSettings() {
   s.commitTemplate = v.commitTemplate;
   s.commitPrefixes = v.commitPrefixes.trim();
   s.workItems = v.workItems;
+  if (v.adoToken.trim() || v.adoForget) {
+    const t = await api.ado.setToken(v.adoForget ? '' : v.adoToken.trim());
+    if (!t.ok) showError("Couldn't save the Azure DevOps token", new Error(t.error));
+    state.adoToken = await api.ado.hasToken();
+    state.prStatus = {};
+    for (const k of Object.keys(prLoaded)) delete prLoaded[k];
+    loadPrStatus(currentRepo(), true);
+  }
   s.claudePath = v.claudePath.trim();
   s.claudeModel = v.claudeModel.trim();
   s.previewCommands = v.preview;
@@ -3578,6 +3637,7 @@ const actions = {
   'ws-finish': () => wsFinish(),
   'discard-hunk': (t) => discardBlock(t.dataset.h),
   'tidy-commits': () => tidyCommits(currentRepo()),
+  'open-pr-web': (t) => api.openUrl(t.dataset.url),
   'add-tag': (t) => addTag(currentRepo(), t.dataset.hash),
   'delete-tag': (t) => deleteTag(currentRepo(), t.dataset.name),
   'push-tag': async (t) => { const repo = currentRepo(); try { await busy(repo, 'Sending tag…', () => git('pushTag', repo, t.dataset.name)); toast(`Sent ${t.dataset.name} to the server.`, 'ok'); } catch (e) { showError("Couldn't send the tag", e); } },
@@ -3892,6 +3952,7 @@ function updateWatchers() {
 
 async function init() {
   state.config = await api.getConfig();
+  state.adoToken = await api.ado.hasToken().catch(() => false);
   api.onLog(addLog);
   api.claude.onEvent(onClaudeEvent);
   api.onProgress((p) => {
@@ -3931,7 +3992,9 @@ async function init() {
     const gap = document.hasFocus() ? 20000 : 60000;
     if (Date.now() - lastPoll >= gap) { lastPoll = Date.now(); refreshAll(); }
   }, 2000);
-  window.addEventListener('focus', () => { lastPoll = Date.now(); refreshAll(); });
+  window.addEventListener('focus', () => { lastPoll = Date.now(); refreshAll(); loadPrStatus(currentRepo()); });
+  // Pull request status changes on the server (reviews, builds); loadPrStatus limits itself to every 5 minutes.
+  setInterval(() => { if (document.hasFocus()) loadPrStatus(currentRepo()); }, 60000);
   setTimeout(backgroundFetch, 5000);
   setInterval(backgroundFetch, 60000);
   const id = await git('getIdentity').catch(() => null);

@@ -616,6 +616,11 @@ const ops = {
     return true;
   },
 
+  async remoteUrl(repo) {
+    const r = await run(repo, ['remote', 'get-url', 'origin'], { quiet: true });
+    return r.ok ? r.stdout.trim() : null;
+  },
+
   async remoteWebUrl(repo) {
     const r = await run(repo, ['remote', 'get-url', 'origin'], { quiet: true });
     return r.ok ? webUrl(r.stdout) : null;

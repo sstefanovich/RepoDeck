@@ -10,7 +10,7 @@
     "test:ui": "node --test --test-concurrency=1 \"test/ui/*.test.js\"",
     "dist": "electron-builder --win",
     "pack": "electron-builder --win --dir",
-    "check": "node --check main.js && node --check preload.js && node --check src/git.js && node --check src/claude.js && node --check renderer/lib.js && node --check renderer/app.js"
+    "check": "node --check main.js && node --check preload.js && node --check src/git.js && node --check src/claude.js && node --check src/ado.js && node --check renderer/lib.js && node --check renderer/app.js"
   },
   "devDependencies": {
     "electron": "^45.2.0",
