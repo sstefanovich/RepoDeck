@@ -3,3 +3,4 @@ out/
 dist/
 *.log
 .demo/
+test/ui/output/

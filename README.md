@@ -174,6 +174,8 @@ Settings and workspaces are stored in `%APPDATA%\repodeck\config.json`, and Clau
 ```bash
 npm start      # run the app
 npm test       # run the tests (git operations run against throwaway repos)
+npm run test:ui  # screen tests: opens the app on a throwaway repo, clicks through every tab
+                 # at two window sizes and checks nothing spills out or gets cut off
 npm run check  # syntax-check every source file
 npm run dist   # build the Windows installer into dist/
 ```
