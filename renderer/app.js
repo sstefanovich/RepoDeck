@@ -110,6 +110,7 @@ const state = {
   progress: {},       // repo (or 'clone') -> { text, percent } for long operations
   undos: [],          // recent actions that can be undone, newest first (see recordUndo)
   prStatus: {},       // norm(repo) -> pull request info from Azure DevOps, for the current branch
+  workItem: {},       // "repo|branch" -> work item number typed in the commit box
   histFile: null,     // History: only commits touching this file
   histQuery: '',      // History: search text
 };
@@ -859,6 +860,7 @@ function renderChangesTab() {
           <div class="spacer"></div><button class="btn small ghost" data-action="write-message" title="Let Claude write a message from the ticked changes">✦ Write message</button></div>` : ''}
         <input id="commit-summary" placeholder="Summary (required) — e.g. Fix login button" maxlength="200" value="${esc(msg.summary)}" spellcheck="true" aria-label="Commit summary">
         <textarea id="commit-body" rows="2" placeholder="Description (optional)" aria-label="Commit description">${esc(msg.body)}</textarea>
+        ${state.config.settings.workItems !== false ? `<label class="wi-row" title="Adds AB#&lt;number&gt; to the commit message, which links the commit to that work item in Azure Boards"><span>Work item</span><span class="muted">AB#</span><input id="work-item" inputmode="numeric" placeholder="none" spellcheck="false" aria-label="Azure Boards work item number"></label>` : ''}
         <label class="check amend-row" id="amend-row" hidden title="git commit --amend"><input type="checkbox" id="amend" data-action="amend-toggle"> <span>Add to my last commit instead (amend) — <span class="muted" id="amend-what"></span></span></label>
         <div class="commit-actions">
           <button class="btn primary grow" id="commit-btn" data-action="commit" title="git commit — Ctrl+Enter">Commit</button>
@@ -941,11 +943,22 @@ function renderFileList() {
   updateCommitButtons();
 }
 
+// The work item box follows the branch: what you typed for it, else the number in its name.
+const workItemKey = (repo, branch) => `${norm(repo)}|${branch}`;
+function syncWorkItem(repo, st) {
+  const input = $('#work-item');
+  const key = workItemKey(repo, st.branch);
+  if (!input || input.dataset.key === key) return;
+  input.dataset.key = key;
+  input.value = state.workItem[key] ?? workItemFromBranch(st.branch) ?? '';
+}
+
 function updateCommitButtons() {
   const repo = currentRepo();
   const btn = $('#commit-btn');
   if (!btn) return;
   const st = state.status[repo] || {};
+  syncWorkItem(repo, st);
   const files = changedFiles(st);
   const n = files.filter((f) => state.checked[repo]?.[f.path]).length;
   const summary = $('#commit-summary').value.trim();
@@ -1174,7 +1187,7 @@ async function doCommit(repo, thenPush) {
   const amend = !!$('#amend')?.checked;
   if (!ticked.length && !amend) return;
   const paths = ticked.flatMap((f) => (f.orig ? [f.path, f.orig] : [f.path]));
-  const message = body ? `${summary}\n\n${body}` : summary;
+  const message = withWorkItem(body ? `${summary}\n\n${body}` : summary, $('#work-item')?.value);
   // Files with some lines left out: { file: [keys of the left-out lines] }.
   const partial = st.op ? null : Object.fromEntries(ticked.filter((f) => partlyPicked(repo, f.path)).map((f) => [f.path, [...state.excluded[repo][f.path]]]));
   const some = partial && Object.keys(partial).length ? partial : null;
@@ -2787,6 +2800,7 @@ async function openSettings() {
       <h3>Commits</h3>
       <label class="field"><span>Start every commit summary with (optional)</span><input name="commitTemplate" value="${esc(s.commitTemplate || '')}" placeholder="e.g. ABC-123: "></label>
       <label class="field"><span>Quick type buttons above the summary (space-separated; empty to hide)</span><input name="commitPrefixes" value="${esc(s.commitPrefixes ?? 'feat fix docs refactor test chore')}"></label>
+      <label class="check"><input type="checkbox" name="workItems" ${s.workItems !== false ? 'checked' : ''}> Show a work item box (AB#) for Azure Boards, filled in from the branch name (e.g. feature/1234-login)</label>
       <h3>Seeing what happens</h3>
       <label class="check"><input type="checkbox" name="preview" ${s.previewCommands ? 'checked' : ''}> Show me the git commands before running any action</label>
       <p class="hint">You can always hold <b>Shift</b> while clicking a button to preview just that one action.</p>
@@ -2807,6 +2821,7 @@ async function openSettings() {
   s.theme = v.theme;
   s.commitTemplate = v.commitTemplate;
   s.commitPrefixes = v.commitPrefixes.trim();
+  s.workItems = v.workItems;
   s.claudePath = v.claudePath.trim();
   s.claudeModel = v.claudeModel.trim();
   s.previewCommands = v.preview;
@@ -3712,6 +3727,9 @@ document.addEventListener('input', (e) => {
   if (e.target.id === 'commit-summary' || e.target.id === 'commit-body') {
     state.commitMsg[repo] = { summary: $('#commit-summary').value, body: $('#commit-body').value };
     updateCommitButtons();
+  } else if (e.target.id === 'work-item') {
+    e.target.value = e.target.value.replace(/[^\d]/g, '');
+    state.workItem[e.target.dataset.key] = e.target.value;
   } else if (e.target.classList.contains('custom') && state.conflict) {
     state.conflict.custom[e.target.dataset.i] = e.target.value;
     if (!state.conflict.resultDirty) state.conflict.resultText = null;

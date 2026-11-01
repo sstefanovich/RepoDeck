@@ -636,3 +636,7 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
 .tidy-head { display: flex; align-items: center; gap: 10px; }
 .tidy-head select { width: auto; }
 .tidy-note { margin: 0; }
+/* work item (Azure Boards) */
+.wi-row { display: flex; align-items: center; gap: 6px; font-size: 12.5px; }
+.wi-row > span:first-child { font-weight: 600; }
+.wi-row input { width: 110px; padding: 3px 8px; }
