@@ -267,6 +267,8 @@ a { color: var(--accent); }
 .c-R, .c-C, .c-T { color: var(--accent); background: var(--accent-soft); }
 .c-U { color: #fff; background: var(--bad); }
 .check { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.check input[type=radio] { width: 15px; height: 15px; margin: 2px 0 0; padding: 0; flex-shrink: 0; align-self: flex-start; accent-color: var(--accent); }
+.check:has(input:disabled) { opacity: .5; cursor: default; }
 input[type=checkbox] { accent-color: var(--accent); width: 15px; height: 15px; margin: 0; cursor: pointer; }
 
 .commit-box { border-top: 1px solid var(--border); padding: 10px; display: flex; flex-direction: column; gap: 6px; background: var(--panel-2); }
@@ -310,6 +312,12 @@ input.filter { width: 260px; }
 .dl.del { background: var(--del-bg); }
 .dl.del .ln { background: var(--del-ln); }
 .dl.hunk { background: var(--hunk); color: var(--muted); }
+/* Tick boxes for committing only some lines. Left-out lines lose their colour. */
+.dl .lp { width: 24px; flex-shrink: 0; display: grid; place-items: center; }
+.dl .lp input { width: 13px; height: 13px; }
+.dl.add.off, .dl.del.off, .dl.add.off .ln, .dl.del.off .ln { background: none; }
+.dl.off .code { opacity: .5; }
+.dl.add.off mark, .dl.del.off mark { background: none; }
 .dfile { position: sticky; left: 0; font: 600 13px "Segoe UI", system-ui, sans-serif; padding: 8px 12px; background: var(--panel-2); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
 .dfile:first-child { border-top: none; }
 .dnote { padding: 4px 12px; color: var(--muted); font-style: italic; font-family: "Segoe UI", system-ui, sans-serif; }
@@ -331,6 +339,7 @@ input.filter { width: 260px; }
 .commit:hover { background: var(--panel-2); }
 .commit.selected { background: var(--accent-soft); border-left-color: var(--accent); }
 .commit-subject { font-weight: 500; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.commit-subject .tag { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .commit-meta { font-size: 12px; color: var(--muted); }
 .incoming { background: var(--ok-soft); border-bottom: 2px solid var(--ok); }
 .incoming-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; justify-content: space-between; }
@@ -339,9 +348,18 @@ input.filter { width: 260px; }
 .cd-subject { font-size: 16px; font-weight: 600; }
 .cd-body { white-space: pre-wrap; font-family: inherit; margin: 8px 0; color: var(--text); }
 .cd-meta { color: var(--muted); font-size: 12px; margin-top: 4px; }
-.commit-subject .tag { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .cd-actions { display: flex; gap: 10px; align-items: center; margin-top: 10px; }
 .cd-actions .hint { margin: 0; }
+/* compare */
+.cmp-sum { padding: 10px 12px; font-size: 12.5px; color: var(--muted); border-bottom: 1px solid var(--border); }
+.cmp-commits { border-bottom: 1px solid var(--border); }
+.cmp-commits > summary { padding: 8px 12px; cursor: pointer; font-weight: 600; font-size: 12.5px; }
+.cmp-commit { cursor: default; }
+.cmp-commit:hover { background: none; }
+.cmp-stat { flex-shrink: 0; font: 11.5px var(--mono); }
+.st-add { color: var(--ok); }
+.st-del { color: var(--bad); }
+.uf-info { min-height: 20px; margin: 0 0 12px; }
 .explain { background: var(--accent-soft); border-radius: var(--radius); padding: 10px 14px; margin-bottom: 12px; flex-shrink: 0; }
 
 /* conflicts */

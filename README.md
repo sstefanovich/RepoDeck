@@ -32,6 +32,7 @@ Most git tools assume you already know git and that you work in one repo at a ti
 - **✦ Write message:** Claude writes the commit message from your ticked changes.
 - **Type buttons** (`feat`, `fix`, `docs`…) and an optional message template.
 - **Amend** the last commit, as long as it hasn't been sent.
+- **Commit only some lines.** Untick single lines, or a whole block, in the diff to leave them out. They stay in your folder as uncommitted changes. A file with some lines left out shows a half-ticked box.
 - Diffs have syntax colours and highlight the changed words, shown **inline** or **side by side**.
 
 ![Changes tab: ticked files, the commit box with type buttons and Write message, and a coloured diff](docs/screenshots/changes.png)
@@ -40,7 +41,7 @@ Most git tools assume you already know git and that you work in one repo at a ti
 
 ### Undo
 
-After a commit, merge, get latest, cherry-pick, branch switch, branch delete or Shelf delete, a message with an **Undo** button appears. If something was already sent to the server, RepoDeck says so instead of quietly rewriting it.
+After a commit, merge, get latest, update from another branch, reversed commit, cherry-pick, branch switch, branch delete or Shelf delete, a message with an **Undo** button appears. If something was already sent to the server, RepoDeck says so instead of quietly rewriting it.
 
 ![“Committed to feature/login.” with an Undo button](docs/screenshots/undo.png)
 
@@ -48,6 +49,8 @@ After a commit, merge, get latest, cherry-pick, branch switch, branch delete or 
 
 - Click the branch name for a **quick switcher**: type to filter, then <kbd>Enter</kbd> to switch, or create a new branch.
 - Switching with uncommitted changes asks whether to **bring them along** or **leave them on the Shelf**. If you leave them, RepoDeck offers to put them back when you return.
+- **Update from…** brings in the new commits from any branch you pick, such as `main`, `dev` or a teammate's branch, by **merge** or **rebase**. It shows how many commits you'll get and remembers your choice for each branch. Rebase is turned off once your commits are on the server, because it would rewrite them.
+- **Compare** two branches: what one has that the other doesn't, either *since they split* (what a pull request would show) or the *exact difference*. You get the commits, the changed files with line counts, and each file's diff.
 - **Tidy up** finds branches that are merged, or were deleted on the server after a pull request, and removes them in one go (with Undo).
 - After you **Send** a feature branch, RepoDeck offers to **open a pull request** on GitHub, Azure DevOps, GitLab or Bitbucket.
 
@@ -57,6 +60,7 @@ After a commit, merge, get latest, cherry-pick, branch switch, branch delete or 
 
 - A **commit graph**, **search** by message, author or hash, and **history of a single file**.
 - **✦ Explain** asks Claude what a commit did and why.
+- **Reverse this commit** (`git revert`) backs out any earlier commit by adding one that does the opposite. It's safe even after the commit was sent, unlike Undo.
 - **Cherry-pick:** open any branch, tick commits, and copy them into your branch. Commits already there are hidden.
 - **Copy to another branch** works without switching yourself: RepoDeck shelves your work, switches, cherry-picks, comes back and restores it.
 - If a cherry-pick stops with a conflict, you can **Continue**, **Skip this commit** or **Abort**.
