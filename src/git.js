@@ -5,7 +5,7 @@ const { execFile } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { partialPatch } = require('../renderer/lib');
+const { partialPatch, changedLines } = require('../renderer/lib');
 
 const ENV = {
   ...process.env,
@@ -30,9 +30,10 @@ const lit = (p) => `:(literal)${p}`;
 
 const quoteArg = (a) => (/[\s"']/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a);
 
-function run(cwd, args, { quiet = false, input, background = false, progressKey = null } = {}) {
+// extraEnv: added to git's environment for this one command.
+function run(cwd, args, { quiet = false, input, background = false, progressKey = null, extraEnv = null } = {}) {
   return new Promise((resolve) => {
-    const env = background ? { ...ENV, GCM_INTERACTIVE: 'never' } : ENV;
+    const env = { ...ENV, ...(background ? { GCM_INTERACTIVE: 'never' } : {}), ...extraEnv };
     const child = execFile(
       'git',
       ['-c', 'core.quotepath=false', '-c', 'color.ui=never', ...args],
@@ -185,15 +186,16 @@ const ops = {
     if (!fs.existsSync(repo)) return { missing: true };
     const r = await run(repo, ['status', '--porcelain=v2', '--branch', '-z', '--untracked-files=all'], { quiet: true });
     if (!r.ok) return { error: (r.stderr || 'Not a git repository').trim() };
-    const s = { branch: null, detached: false, oid: null, initial: false, upstream: null, ahead: 0, behind: 0, staged: [], unstaged: [], untracked: [], conflicted: [] };
+    const s = { branch: null, detached: false, oid: null, initial: false, upstream: null, upstreamGone: false, ahead: 0, behind: 0, staged: [], unstaged: [], untracked: [], conflicted: [] };
     const parts = r.stdout.split('\0');
     for (let i = 0; i < parts.length; i++) {
       const line = parts[i];
       if (!line) continue;
       if (line.startsWith('# branch.oid ')) { s.oid = line.slice(13); s.initial = s.oid === '(initial)'; }
       else if (line.startsWith('# branch.head ')) { const h = line.slice(14); if (h === '(detached)') s.detached = true; else s.branch = h; }
-      else if (line.startsWith('# branch.upstream ')) s.upstream = line.slice(18);
-      else if (line.startsWith('# branch.ab ')) { const m = line.match(/\+(\d+) -(\d+)/); if (m) { s.ahead = +m[1]; s.behind = +m[2]; } }
+      // git prints no ahead/behind line when the upstream branch is gone from the server.
+      else if (line.startsWith('# branch.upstream ')) { s.upstream = line.slice(18); s.upstreamGone = true; }
+      else if (line.startsWith('# branch.ab ')) { s.upstreamGone = false; const m = line.match(/\+(\d+) -(\d+)/); if (m) { s.ahead = +m[1]; s.behind = +m[2]; } }
       else if (line[0] === '1' || line[0] === '2') {
         const f = line.split(' ');
         const xy = f[1];
@@ -451,6 +453,73 @@ const ops = {
     return { ahead, behind, sent, canRebase: sent === 0 };
   },
 
+  // After a branch's pull request is merged: switch to the default branch, get its latest, and
+  // delete the branch (here, and on the server if it's still there and `deleteRemote`).
+  // If the branch's commits aren't in the default branch as-is (normal after a squash merge),
+  // nothing is changed and { needsForce: true } comes back, unless `force` is set.
+  async finishBranch(repo, { force = false, deleteRemote = false } = {}) {
+    const st = await ops.status(repo);
+    if (st.op || st.conflicted.length) throw new GitError('Finish or abort what is in progress first (see the yellow banner).');
+    if (!st.branch) throw new GitError("You're not on a branch.");
+    if (st.staged.length + st.unstaged.length + st.untracked.length) throw new GitError('You have uncommitted changes on this branch. Commit them or put them on the Shelf first, so nothing is lost.', 'DIRTY');
+    const branch = st.branch;
+    const target = await ops.defaultBranch(repo);
+    if (!target || target === branch) throw new GitError(`${branch} is the main branch, so there's nothing to finish.`);
+    if (st.hasRemote) await run(repo, ['fetch', '--prune', '--quiet'], { background: true });
+    const oid = st.oid;
+    const isIn = async (ref) => (await run(repo, ['merge-base', '--is-ancestor', oid, ref], { quiet: true })).ok;
+    const merged = (await isIn(`refs/remotes/origin/${target}`)) || (await isIn(`refs/heads/${target}`));
+    if (!merged && !force) return { needsForce: true, branch, target };
+    const hasLocal = (await run(repo, ['rev-parse', '--verify', '-q', `refs/heads/${target}`], { quiet: true })).ok;
+    await must(repo, hasLocal ? ['switch', target] : ['switch', '-c', target, '--track', `origin/${target}`]);
+    let pulled = null;
+    const after = await ops.status(repo);
+    if (after.upstream && !after.upstreamGone) pulled = await ops.pull(repo, 'ff').catch((e) => ({ ok: false, output: e.message }));
+    await must(repo, ['branch', '-D', branch]);
+    const slash = st.upstream ? st.upstream.indexOf('/') : -1;
+    if (deleteRemote && slash > 0 && !st.upstreamGone) await must(repo, ['push', st.upstream.slice(0, slash), '--delete', st.upstream.slice(slash + 1)]);
+    return { ok: true, branch, target, oid, pulled: pulled ? !!pulled.ok : null };
+  },
+
+  // Commits on this branch that haven't been sent, oldest first — the ones that are safe to rewrite.
+  async unsentCommits(repo) {
+    const st = await ops.status(repo);
+    if (!st.branch || st.initial) return { commits: [] };
+    let range;
+    if (st.upstream && !st.upstreamGone) range = ['@{u}..HEAD'];
+    else if (st.hasRemote) range = ['HEAD', '--not', '--remotes'];
+    else {
+      const def = await ops.defaultBranch(repo);
+      range = def && def !== st.branch ? ['HEAD', '--not', `refs/heads/${def}`] : ['HEAD'];
+    }
+    const r = await must(repo, ['log', '-n51', '--reverse', '--format=%H%x1f%h%x1f%P%x1f%B%x1e', ...range], { quiet: true });
+    let commits = r.stdout.split('\x1e').map((s) => s.replace(/^\s+/, '')).filter(Boolean).map((rec) => {
+      const [hash, short, parents, message] = rec.split('\x1f');
+      return { hash, short, parents: parents ? parents.split(' ') : [], message: (message || '').trim() };
+    });
+    // `log -n51 --reverse` takes the newest 51 first, so dropping the oldest keeps the newest 50.
+    const more = commits.length > 50;
+    if (more) commits = commits.slice(1);
+    return { commits, more, hasMerge: commits.some((c) => c.parents.length > 1) };
+  },
+
+  // Rewrites unsent commits. steps (oldest first): [{ hash, action: 'pick'|'squash'|'drop', message? }].
+  // 'squash' folds a commit into the one before it; a message on a pick (or on the first commit of a
+  // squashed group) replaces that commit's message.
+  async tidyCommits(repo, steps) {
+    const { todo, files } = tidyTodo(steps);
+    const first = steps[0].hash;
+    const root = !(await run(repo, ['rev-parse', '--verify', '-q', `${first}^`], { quiet: true })).ok;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'repodeck-tidy-'));
+    const todoFile = path.join(dir, 'todo');
+    fs.writeFileSync(todoFile, todo.map((l) => l.replace('{dir}', dir.replace(/\\/g, '/'))).join('\n') + '\n');
+    for (const [name, text] of Object.entries(files)) fs.writeFileSync(path.join(dir, name), text);
+    // git runs the "sequence editor" with its own to-do file as the argument: replace it with ours.
+    const editor = `cp "${todoFile.replace(/\\/g, '/')}"`;
+    const r = await run(repo, ['rebase', '-i', '--autostash', ...(root ? ['--root'] : [`${first}^`])], { extraEnv: { GIT_SEQUENCE_EDITOR: editor } });
+    return withConflicts(repo, r);
+  },
+
   // Bring another branch's new commits into the current one, by merge or by rebase.
   async updateFrom(repo, ref, mode = 'merge') {
     const args = mode === 'rebase' ? ['rebase', '--autostash', ref] : ['merge', '--no-edit', '--autostash', ref];
@@ -547,6 +616,11 @@ const ops = {
     return true;
   },
 
+  async remoteUrl(repo) {
+    const r = await run(repo, ['remote', 'get-url', 'origin'], { quiet: true });
+    return r.ok ? r.stdout.trim() : null;
+  },
+
   async remoteWebUrl(repo) {
     const r = await run(repo, ['remote', 'get-url', 'origin'], { quiet: true });
     return r.ok ? webUrl(r.stdout) : null;
@@ -578,6 +652,99 @@ const ops = {
     return { commits, unpushed, incoming, upstream: up.ok ? up.stdout.trim() : null };
   },
 
+  // Branches whose name contains `query`, and commits (on any branch) whose message or author
+  // contains it, or whose hash starts with it. Each commit says which branch it's on.
+  async search(repo, query, { limit = 25 } = {}) {
+    const q = String(query || '').trim();
+    if (q.length < 2) return { branches: [], commits: [] };
+    const refs = (await run(repo, ['for-each-ref', '--format=%(refname)', 'refs/heads', 'refs/remotes'], { quiet: true })).stdout.split('\n').filter(Boolean);
+    const lower = q.toLowerCase();
+    const branches = refs.filter((r) => !r.endsWith('/HEAD')).map((r) => ({ name: r.replace(/^refs\/(heads|remotes)\//, ''), remote: r.startsWith('refs/remotes/') }))
+      .filter((b) => b.name.toLowerCase().includes(lower)).slice(0, 20);
+    const fmt = '%H%x1f%h%x1f%an%x1f%at%x1f%s%x1e';
+    const parse = (out) => out.split('\x1e').map((s) => s.trim()).filter(Boolean).map((rec) => {
+      const [hash, short, author, date, subject] = rec.split('\x1f');
+      return { hash, short, author, date: +date, subject };
+    });
+    const log = (...filter) => run(repo, ['log', '--all', `-n${limit}`, '-i', '--fixed-strings', `--format=${fmt}`, ...filter], { quiet: true }).then((r) => parse(r.stdout));
+    const found = [...(await log(`--grep=${q}`)), ...(await log(`--author=${q}`))];
+    if (/^[0-9a-f]{4,40}$/i.test(q)) {
+      const h = await run(repo, ['log', '-1', `--format=${fmt}`, `${q}^{commit}`], { quiet: true });
+      if (h.ok) found.unshift(...parse(h.stdout));
+    }
+    const seen = new Set();
+    const commits = found.filter((c) => !seen.has(c.hash) && seen.add(c.hash)).sort((a, b) => b.date - a.date).slice(0, limit);
+    if (commits.length) {
+      // "main~3" or "remotes/origin/dev~2^2" -> the branch the commit is on.
+      const names = (await run(repo, ['name-rev', '--name-only', '--refs=refs/heads/*', '--refs=refs/remotes/*', ...commits.map((c) => c.hash)], { quiet: true })).stdout.split('\n');
+      commits.forEach((c, i) => { const n = (names[i] || '').trim().replace(/[~^].*$/, '').replace(/^remotes\//, ''); c.on = n && n !== 'undefined' ? n : null; });
+    }
+    return { branches, commits };
+  },
+
+  // ---------- tags ----------
+  async tags(repo) {
+    const fmt = ['%(refname:short)', '%(objectname)', '%(objecttype)', '%(*objectname)', '%(creatordate:unix)', '%(contents:subject)'].join('%1f');
+    const r = await must(repo, ['for-each-ref', '--sort=-creatordate', `--format=${fmt}`, 'refs/tags'], { quiet: true });
+    return r.stdout.split('\n').filter(Boolean).map((line) => {
+      const [name, oid, type, target, date, subject] = line.split('\x1f');
+      const annotated = type === 'tag';
+      return { name, commit: annotated ? target : oid, annotated, date: +date, message: annotated ? subject : '' };
+    });
+  },
+
+  async checkTagName(name) {
+    return (await run(os.homedir(), ['check-ref-format', `refs/tags/${name}`], { quiet: true })).ok && !/\s/.test(name);
+  },
+
+  // A message makes an annotated tag (with author and date), which is what releases usually want.
+  async createTag(repo, name, hash, message = '') {
+    await must(repo, message ? ['tag', '-a', name, '-m', message, hash] : ['tag', name, hash]);
+    return true;
+  },
+
+  async pushTag(repo, name) {
+    await must(repo, ['push', await firstRemote(repo), `refs/tags/${name}`]);
+    return true;
+  },
+
+  // Returns what the tag pointed at, so Undo can put it back exactly (annotation included).
+  async deleteTag(repo, name, { remote = false } = {}) {
+    const oid = (await must(repo, ['rev-parse', '--verify', `refs/tags/${name}`], { quiet: true })).stdout.trim();
+    await must(repo, ['tag', '-d', name]);
+    if (remote) await must(repo, ['push', await firstRemote(repo), '--delete', `refs/tags/${name}`]);
+    return { oid };
+  },
+
+  async restoreTag(repo, name, oid) {
+    await must(repo, ['update-ref', `refs/tags/${name}`, oid]);
+    return true;
+  },
+
+  // Who last changed each line of `file` (as it is on disk now; uncommitted lines have an all-zero hash).
+  // -> { lines: [{ hash, n, text }], commits: { hash: { author, time, summary } }, truncated }
+  async blame(repo, file) {
+    // blame takes a plain path (no pathspec magic); `--` keeps names like "-x" safe.
+    const r = await must(repo, ['blame', '--porcelain', '--', file], { quiet: true });
+    const lines = [];
+    const commits = {};
+    let cur = null;
+    for (const raw of r.stdout.split('\n')) {
+      if (raw.startsWith('\t')) {
+        if (lines.length < 20000) lines.push({ hash: cur.hash, n: cur.n, text: raw.slice(1).replace(/\r$/, '') });
+        continue;
+      }
+      const head = raw.match(/^([0-9a-f]{40}) \d+ (\d+)/);
+      if (head) { cur = { hash: head[1], n: +head[2] }; commits[cur.hash] ||= { author: '', time: 0, summary: '' }; continue; }
+      if (!cur) continue;
+      const c = commits[cur.hash];
+      if (raw.startsWith('author ')) c.author = raw.slice(7);
+      else if (raw.startsWith('author-time ')) c.time = +raw.slice(12);
+      else if (raw.startsWith('summary ')) c.summary = raw.slice(8);
+    }
+    return { lines, commits, truncated: lines.length >= 20000 };
+  },
+
   async commitDetails(repo, hash) {
     const meta = await must(repo, ['show', '-s', '--format=%H%x1f%an%x1f%ae%x1f%at%x1f%P%x1f%B', hash], { quiet: true });
     const [full, author, email, date, parents, body] = meta.stdout.split('\x1f');
@@ -600,10 +767,32 @@ const ops = {
     });
   },
 
-  async stashSave(repo, message) {
+  // paths: only shelve these files (all changes when omitted).
+  async stashSave(repo, message, paths = null) {
     const args = ['stash', 'push', '--include-untracked'];
     if (message) args.push('-m', message);
+    if (paths?.length) {
+      await must(repo, [...args, '--pathspec-from-file=-', '--pathspec-file-nul'], { input: paths.map(lit).join('\0') });
+      return true;
+    }
     await must(repo, args);
+    return true;
+  },
+
+  // Throws away some changed lines of a file (keys from lineKeyer) and returns the patch that
+  // puts them back, for Undo.
+  async discardLines(repo, file, keys) {
+    const d = await must(repo, ['diff', 'HEAD', '--', lit(file)], { quiet: true });
+    const keep = new Set(keys);
+    const others = changedLines(d.stdout).map((x) => x.key).filter((k) => !keep.has(k));
+    const patch = partialPatch(d.stdout, others);
+    if (!patch) throw new GitError('Those lines have already changed. Look at the file again and retry.');
+    await must(repo, ['apply', '-R', '--whitespace=nowarn', '-'], { input: patch });
+    return { patch };
+  },
+
+  async applyPatch(repo, patch) {
+    await must(repo, ['apply', '--whitespace=nowarn', '-'], { input: patch });
     return true;
   },
 
@@ -755,6 +944,41 @@ const ops = {
 const autoShelfMessage = (from, to) => `[auto] ${from}: left behind when switching to ${to}`;
 const revertShelfMessage = (branch) => `[auto] ${branch}: set aside while reversing a commit`;
 
+// The rebase to-do list for tidyCommits, and the message files its "exec" lines read ({dir} is
+// replaced with their folder). A message is applied after the last commit squashed into it.
+function tidyTodo(steps) {
+  const todo = [];
+  const files = {};
+  let group = null; // the kept commit that following "squash" steps fold into
+  const close = () => {
+    if (group?.message != null) {
+      const name = `msg${group.index}.txt`;
+      files[name] = group.message.trim() + '\n';
+      todo.push(`exec git commit --amend --only -q -F "{dir}/${name}"`);
+    }
+    group = null;
+  };
+  steps.forEach((s, i) => {
+    if (s.action === 'drop') { todo.push(`drop ${s.hash}`); return; }
+    if (s.action === 'squash') {
+      if (!group) throw new GitError('A commit can only be combined into a kept commit before it.');
+      todo.push(`fixup ${s.hash}`);
+      return;
+    }
+    close();
+    group = { index: i, message: s.message };
+    todo.push(`pick ${s.hash}`);
+  });
+  close();
+  return { todo, files };
+}
+
+async function firstRemote(repo) {
+  const remotes = (await run(repo, ['remote'], { quiet: true })).stdout.split(/\r?\n/).filter(Boolean);
+  if (!remotes.length) throw new GitError('This repo has no server (remote) configured.', 'NO_REMOTE');
+  return remotes.includes('origin') ? 'origin' : remotes[0];
+}
+
 // One patch per partly-ticked file, made from a fresh diff so it matches the files on disk.
 async function partialPatches(repo, partial) {
   const patches = [];
@@ -842,6 +1066,36 @@ const plans = {
     ...(remote ? [step(['push', remote.remote, '--delete', remote.branch], 'Also delete it on the server.')] : []),
   ],
   merge: (repo, branch) => [step(['merge', '--no-edit', '--autostash', branch], `Copy the commits from ${branch} into your current branch. If the same lines changed on both, you'll be asked to resolve conflicts.`)],
+  async finishBranch(repo, { deleteRemote = false } = {}) {
+    const st = await ops.status(repo);
+    const target = (await ops.defaultBranch(repo)) || 'main';
+    const slash = st.upstream ? st.upstream.indexOf('/') : -1;
+    return [
+      ...(st.hasRemote ? [step(['fetch', '--prune'], 'Ask the server what changed, so the merged work is known.')] : []),
+      step(['switch', target], `Go to ${target}.`),
+      ...(st.upstream ? [step(['pull', '--ff-only', '--autostash'], `Get the latest ${target}, which now includes your merged work.`)] : []),
+      step(['branch', '-D', st.branch], `Delete ${st.branch} on your computer. Undo can bring it back.`),
+      ...(deleteRemote && slash > 0 && !st.upstreamGone ? [step(['push', st.upstream.slice(0, slash), '--delete', st.upstream.slice(slash + 1)], 'Also delete it on the server.')] : []),
+    ];
+  },
+  createTag: (repo, name, hash, message = '') => [step(message ? ['tag', '-a', name, '-m', firstLine(message), hash.slice(0, 10)] : ['tag', name, hash.slice(0, 10)],
+    `Put the label ${name} on that commit${message ? ', with your message, author and date' : ''}. It stays on your computer until you send it.`)],
+  pushTag: (repo, name) => [step(['push', 'origin', `refs/tags/${name}`], `Send the tag ${name} to the server.`)],
+  deleteTag: (repo, name, { remote = false } = {}) => [
+    step(['tag', '-d', name], `Remove the tag ${name} from your computer. Undo can put it back.`),
+    ...(remote ? [step(['push', 'origin', '--delete', `refs/tags/${name}`], 'Also remove it from the server.')] : []),
+  ],
+  restoreTag: (repo, name, oid) => [step(['update-ref', `refs/tags/${name}`, oid.slice(0, 10)], `Put the tag ${name} back, exactly as it was.`)],
+  tidyCommits: (repo, steps) => {
+    const { todo } = tidyTodo(steps);
+    const words = { pick: 'keep', fixup: 'combine into the one above', drop: 'drop' };
+    return [
+      step(['rebase', '-i', '--autostash', `${steps[0].hash.slice(0, 10)}^`], 'Replay your unsent commits with these changes (oldest first). They get new IDs; nothing on the server is touched.'),
+      ...todo.map((l) => (l.startsWith('exec')
+        ? info('…then change that commit\'s message to the one you wrote.')
+        : info(`${words[l.split(' ')[0]]}: ${l.split(' ')[1].slice(0, 7)}`))),
+    ];
+  },
   updateFrom: (repo, ref, mode = 'merge') => [mode === 'rebase'
     ? step(['rebase', '--autostash', ref], `Replay your commits on top of the latest ${ref}, as if you had started from there. Gives a straight history; your commits get new IDs.`)
     : step(['merge', '--no-edit', '--autostash', ref], `Bring ${ref}'s new commits into your branch with a merge commit. Nothing that's already there is rewritten.`)],
@@ -856,7 +1110,11 @@ const plans = {
     ];
   },
   undoLastCommit: () => [step(['reset', '--soft', 'HEAD~1'], 'Remove the last commit but keep all its changes in your folder, ready to commit again.')],
-  stashSave: (repo, message) => [step(['stash', 'push', '--include-untracked', ...(message ? ['-m', message] : [])], 'Put all uncommitted changes (including new files) on the Shelf and make your folder match your last commit.')],
+  stashSave: (repo, message, paths = null) => [paths?.length
+    ? step(['stash', 'push', '--include-untracked', ...(message ? ['-m', message] : []), '--', ...paths], 'Put the changes to these files on the Shelf and put the files back to your last commit. Other changes stay where they are.')
+    : step(['stash', 'push', '--include-untracked', ...(message ? ['-m', message] : [])], 'Put all uncommitted changes (including new files) on the Shelf and make your folder match your last commit.')],
+  discardLines: (repo, file, keys) => [step(['apply', '-R', '-'], `Throw away ${keys.length === 1 ? 'this changed line' : `these ${keys.length} changed lines`} in ${file}, putting them back to your last commit. Undo puts them back.`)],
+  applyPatch: () => [step(['apply', '-'], 'Put the thrown-away lines back.')],
   stashApply: (repo, ref) => [step(['stash', 'apply', ref], 'Copy the changes from this Shelf item into your folder, keeping the item on the Shelf.')],
   stashPop: (repo, ref) => [step(['stash', 'pop', ref], 'Put the changes from this Shelf item back into your folder and remove it from the Shelf (kept if there are conflicts).')],
   stashDrop: (repo, ref) => [step(['stash', 'drop', ref], 'Delete this item from the Shelf for good.')],

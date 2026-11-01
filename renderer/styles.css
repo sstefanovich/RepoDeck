@@ -360,6 +360,8 @@ input.filter { width: 260px; }
 .st-add { color: var(--ok); }
 .st-del { color: var(--bad); }
 .uf-info { min-height: 20px; margin: 0 0 12px; }
+.steps { margin: 0 0 12px; padding-left: 22px; }
+.steps li { margin: 4px 0; }
 .wu-rows { display: flex; flex-direction: column; gap: 2px; max-height: 260px; overflow-y: auto; }
 .wu-row { padding: 4px 0; }
 .wu-info { margin-left: auto; padding-left: 12px; font-size: 12.5px; color: var(--muted); text-align: right; }
@@ -626,3 +628,44 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; border: 2px solid transparent; background-clip: padding-box; }
 ::-webkit-scrollbar-thumb:hover { background-color: var(--muted); }
+.dl.hunk .hunk-discard { flex-shrink: 0; margin: 1px 8px; padding: 0 8px; font: 12px "Segoe UI", system-ui, sans-serif; }
+/* tidy unsent commits */
+.tidy-list { display: flex; flex-direction: column; gap: 8px; max-height: 55vh; overflow-y: auto; }
+.tidy-commit { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
+.tidy-commit.dropped { opacity: .55; }
+.tidy-head { display: flex; align-items: center; gap: 10px; }
+.tidy-head select { width: auto; }
+.tidy-note { margin: 0; }
+/* work item (Azure Boards) */
+.wi-row { display: flex; align-items: center; gap: 6px; font-size: 12.5px; }
+.wi-row > span:first-child { font-weight: 600; }
+.wi-row input { width: 110px; padding: 3px 8px; }
+/* blame */
+.blame { font: 12.5px/1.55 var(--mono); min-width: max-content; }
+.blame-scroll { container-type: inline-size; }
+.bl-group { border-top: 1px solid var(--border); }
+.bl-group:first-child { border-top: none; }
+.bl-head { display: flex; align-items: center; gap: 10px; padding: 3px 10px; background: var(--panel-2); font: 12px "Segoe UI", system-ui, sans-serif; position: sticky; left: 0; max-width: 100cqw; }
+.bl { display: flex; }
+.bl .ln { width: 44px; flex-shrink: 0; text-align: right; padding-right: 8px; color: var(--muted); opacity: .7; user-select: none; }
+.bl .code { white-space: pre; padding: 0 12px 0 6px; }
+.bl-hash { font: inherit; font-family: var(--mono); background: none; border: none; color: var(--accent); cursor: pointer; padding: 0; flex-shrink: 0; }
+.bl-hash:hover { text-decoration: underline; }
+.bl-sum { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bl-who { color: var(--muted); white-space: nowrap; margin-left: auto; }
+.bl-explain { flex-shrink: 0; }
+/* Azure DevOps pull request status */
+.pr-chip { font: inherit; font-size: 12.5px; padding: 3px 10px; border-radius: 12px; border: 1px solid var(--border); background: var(--panel-2); color: var(--text); cursor: pointer; white-space: nowrap; flex-shrink: 0; }
+.pr-chip:hover { border-color: var(--accent); }
+.pr-chip.ok { color: var(--ok); background: var(--ok-soft); border-color: transparent; }
+.pr-chip.bad { color: var(--bad); background: var(--bad-soft); border-color: transparent; }
+.pr-chip.muted { color: var(--muted); cursor: default; }
+/* workspace search */
+.ws-search-row { margin-bottom: 12px; }
+.ws-search { width: 100%; max-width: 640px; }
+.ws-results { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 10px 14px; margin-bottom: 14px; }
+.ws-results-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.ws-hit-repo h3 { margin: 12px 0 4px; }
+.ws-hit { font: inherit; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px 12px; width: 100%; text-align: left; padding: 6px 8px; border: none; border-radius: 6px; background: none; color: var(--text); cursor: pointer; }
+.ws-hit:hover, .ws-hit:focus-visible { background: var(--accent-soft); }
+.ws-hit > span:first-child { min-width: 0; overflow-wrap: anywhere; }

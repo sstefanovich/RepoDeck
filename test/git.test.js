@@ -350,6 +350,186 @@ test('revert with uncommitted edits in the same file sets them aside and puts th
   await ops.abortOp(a, 'revert');
 });
 
+test('finish a branch after its pull request: merged, and squashed', async () => {
+  const srv = sb.server('finish');
+  const a = sb.repo('finish');
+  sb.write(a, 'a.txt', 'a\n');
+  await ops.commit(a, { message: 'base', paths: [], all: true });
+  await ops.addRemote(a, srv);
+  await ops.push(a);
+  sb.sh(a, 'remote', 'set-head', 'origin', 'main');
+  // The "server side" of a pull request, done from a second clone.
+  const reviewer = sb.clone(srv, 'finish-reviewer');
+  const complete = (branch, squash) => {
+    sb.sh(reviewer, 'fetch', '-q');
+    sb.sh(reviewer, 'switch', '-q', 'main');
+    sb.sh(reviewer, 'pull', '-q');
+    if (squash) { sb.sh(reviewer, 'merge', '-q', '--squash', `origin/${branch}`); sb.sh(reviewer, 'commit', '-qm', `Squashed ${branch}`); }
+    else sb.sh(reviewer, 'merge', '-q', '--no-ff', '-m', `Merge ${branch}`, `origin/${branch}`);
+    sb.sh(reviewer, 'push', '-q', 'origin', 'main');
+    sb.sh(reviewer, 'push', '-q', 'origin', '--delete', branch);
+  };
+
+  await ops.createBranch(a, 'feature/one', null);
+  sb.write(a, 'one.txt', '1\n');
+  await ops.commit(a, { message: 'one', paths: [], all: true });
+  await ops.push(a);
+  complete('feature/one', false);
+  await ops.fetch(a);
+  assert.ok((await ops.status(a)).upstreamGone, 'the branch is gone on the server');
+  const r = await ops.finishBranch(a);
+  assert.ok(r.ok && r.pulled);
+  const st = await ops.status(a);
+  assert.equal(st.branch, 'main');
+  assert.ok(fs.existsSync(path.join(a, 'one.txt')), 'main has the merged work');
+  assert.ok(!(await ops.branches(a)).local.some((b) => b.name === 'feature/one'), 'the branch is deleted');
+  await ops.restoreBranch(a, 'feature/one', r.oid);
+  assert.ok((await ops.branches(a)).local.some((b) => b.name === 'feature/one'), 'undo brings it back');
+
+  await ops.createBranch(a, 'feature/two', null);
+  sb.write(a, 'two.txt', '2\n');
+  await ops.commit(a, { message: 'two', paths: [], all: true });
+  await ops.push(a);
+  complete('feature/two', true);
+  const s = await ops.finishBranch(a);
+  assert.ok(s.needsForce, 'a squashed branch is not deleted without asking');
+  assert.equal((await ops.status(a)).branch, 'feature/two', 'nothing changed');
+  assert.ok((await ops.finishBranch(a, { force: true })).ok);
+  assert.equal((await ops.status(a)).branch, 'main');
+  assert.ok(fs.existsSync(path.join(a, 'two.txt')));
+
+  sb.write(a, 'dirty.txt', 'x\n');
+  await ops.switchBranch(a, 'feature/one');
+  await assert.rejects(ops.finishBranch(a), /uncommitted changes/);
+});
+
+test('discard one block of a file (and put it back), and shelve only some files', async () => {
+  const { changedLines } = require('../renderer/lib');
+  const a = sb.repo('discard-block');
+  const lines = Array.from({ length: 20 }, (_, i) => `l${i + 1}`);
+  sb.write(a, 'f.txt', lines.join('\n') + '\n');
+  sb.write(a, 'g.txt', 'g\n');
+  await ops.commit(a, { message: 'base', paths: [], all: true });
+  const edited = [...lines];
+  edited[1] = 'DEBUG';
+  edited[17] = 'KEEP ME';
+  sb.write(a, 'f.txt', edited.join('\n') + '\n');
+  const text = () => fs.readFileSync(path.join(a, 'f.txt'), 'utf8').replace(/\r\n/g, '\n');
+  const debug = changedLines((await ops.fileDiff(a, ['f.txt'])).text).filter((x) => /l2$|DEBUG/.test(x.text)).map((x) => x.key);
+  const { patch } = await ops.discardLines(a, 'f.txt', debug);
+  assert.match(text(), /^l2$/m, 'the debug block is gone');
+  assert.match(text(), /^KEEP ME$/m, 'the other block is untouched');
+  await ops.applyPatch(a, patch);
+  assert.match(text(), /^DEBUG$/m, 'undo puts it back');
+
+  sb.write(a, 'g.txt', 'g changed\n');
+  sb.write(a, 'new.txt', 'new\n');
+  await ops.stashSave(a, 'just g and new', ['g.txt', 'new.txt']);
+  const st = await ops.status(a);
+  assert.deepEqual([...st.unstaged.map((f) => f.path), ...st.untracked.map((f) => f.path)], ['f.txt'], 'f.txt stays; g.txt and new.txt are shelved');
+  assert.equal((await ops.stashList(a))[0].message, 'just g and new');
+});
+
+test('tidy unsent commits: combine, reword, drop', async () => {
+  const srv = sb.server('tidy-commits');
+  const a = sb.repo('tidy-commits');
+  sb.write(a, 'a.txt', 'a\n');
+  await ops.commit(a, { message: 'base', paths: [], all: true });
+  await ops.addRemote(a, srv);
+  await ops.push(a);
+  await ops.createBranch(a, 'feature', null);
+  for (const [file, msg] of [['1.txt', 'wip'], ['2.txt', 'wip 2'], ['3.txt', 'oops, debug file'], ['4.txt', 'Add four']]) {
+    sb.write(a, file, `${file}\n`);
+    await ops.commit(a, { message: msg, paths: [], all: true });
+  }
+  const u = await ops.unsentCommits(a);
+  assert.deepEqual(u.commits.map((c) => c.message), ['wip', 'wip 2', 'oops, debug file', 'Add four'], 'oldest first, nothing from main');
+  const [c1, c2, c3, c4] = u.commits.map((c) => c.hash);
+  sb.write(a, 'wip.txt', 'uncommitted\n');
+  const r = await ops.tidyCommits(a, [
+    { hash: c1, action: 'pick', message: 'Add one and two\n\nCombined from two wip commits.' },
+    { hash: c2, action: 'squash' },
+    { hash: c3, action: 'drop' },
+    { hash: c4, action: 'pick', message: 'Add four (reworded)' },
+  ]);
+  assert.ok(r.ok, r.output);
+  const h = await ops.history(a);
+  assert.deepEqual(h.commits.map((c) => c.subject), ['Add four (reworded)', 'Add one and two', 'base']);
+  assert.ok(fs.existsSync(path.join(a, '2.txt')), 'the combined commit kept both files');
+  assert.ok(!fs.existsSync(path.join(a, '3.txt')), 'the dropped commit is gone');
+  assert.ok(fs.existsSync(path.join(a, 'wip.txt')), 'uncommitted work kept');
+  assert.match(sb.sh(a, 'log', '-1', '--format=%B', 'HEAD~1'), /Combined from two wip commits/);
+  await assert.rejects(ops.tidyCommits(a, [{ hash: c1, action: 'squash' }]), /combined into a kept commit/);
+  // After sending, nothing is left to tidy.
+  await ops.push(a);
+  assert.equal((await ops.unsentCommits(a)).commits.length, 0);
+});
+
+test('blame: who changed each line', async () => {
+  const a = sb.repo('blame');
+  sb.write(a, 'f.txt', 'one\ntwo\nthree\n');
+  await ops.commit(a, { message: 'first version', paths: [], all: true });
+  sb.write(a, 'f.txt', 'one\nTWO\nthree\n');
+  sb.sh(a, '-c', 'user.name=Someone Else', 'commit', '-qam', 'shout two');
+  sb.write(a, 'f.txt', 'one\nTWO\nthree\nfour (not committed)\n');
+  const b = await ops.blame(a, 'f.txt');
+  assert.deepEqual(b.lines.map((l) => l.text), ['one', 'TWO', 'three', 'four (not committed)']);
+  const who = (n) => b.commits[b.lines[n].hash];
+  assert.equal(who(0).summary, 'first version');
+  assert.equal(who(1).summary, 'shout two');
+  assert.equal(who(1).author, 'Someone Else');
+  assert.ok(/^0+$/.test(b.lines[3].hash), 'uncommitted lines have no commit');
+  assert.deepEqual(b.lines.map((l) => l.n), [1, 2, 3, 4]);
+});
+
+test('tags: create, send, delete and put back', async () => {
+  const srv = sb.server('tags');
+  const a = sb.repo('tags');
+  sb.write(a, 'a.txt', 'a\n');
+  await ops.commit(a, { message: 'first', paths: [], all: true });
+  const first = await ops.headOid(a);
+  sb.write(a, 'b.txt', 'b\n');
+  await ops.commit(a, { message: 'second', paths: [], all: true });
+  await ops.addRemote(a, srv);
+  await ops.push(a);
+  assert.ok(await ops.checkTagName('v1.0.0'));
+  assert.ok(!(await ops.checkTagName('bad name')));
+  await ops.createTag(a, 'v0.1', first);
+  await ops.createTag(a, 'v1.0.0', await ops.headOid(a), 'First release\n\nWith notes.');
+  const tags = await ops.tags(a);
+  const byName = Object.fromEntries(tags.map((t) => [t.name, t]));
+  assert.equal(byName['v0.1'].commit, first);
+  assert.ok(!byName['v0.1'].annotated);
+  assert.ok(byName['v1.0.0'].annotated);
+  assert.equal(byName['v1.0.0'].message, 'First release');
+  await ops.pushTag(a, 'v1.0.0');
+  assert.match(sb.sh(srv, 'tag'), /v1\.0\.0/);
+  const { oid } = await ops.deleteTag(a, 'v1.0.0', { remote: true });
+  assert.doesNotMatch(sb.sh(srv, 'tag'), /v1\.0\.0/, 'deleted on the server too');
+  await ops.restoreTag(a, 'v1.0.0', oid);
+  const back = (await ops.tags(a)).find((t) => t.name === 'v1.0.0');
+  assert.ok(back.annotated && back.message === 'First release', 'undo keeps the annotation');
+});
+
+test('search: commits by message, author and hash, and branches by name', async () => {
+  const a = sb.repo('search');
+  sb.write(a, 'a.txt', 'a\n');
+  await ops.commit(a, { message: 'Set up the project', paths: [], all: true });
+  await ops.createBranch(a, 'feature/checkout', null);
+  sb.write(a, 'c.txt', 'c\n');
+  sb.sh(a, '-c', 'user.name=Dana Coder', 'commit', '-q', '--allow-empty', '-m', 'Fix the Checkout total (rounding)');
+  const fix = await ops.headOid(a);
+  await ops.switchBranch(a, 'main');
+  const byMessage = await ops.search(a, 'checkout total');
+  assert.deepEqual(byMessage.commits.map((c) => c.subject), ['Fix the Checkout total (rounding)'], 'case-insensitive, any branch');
+  assert.equal(byMessage.commits[0].on, 'feature/checkout', 'says which branch it is on');
+  assert.equal((await ops.search(a, '(rounding)')).commits.length, 1, 'brackets are matched literally');
+  assert.equal((await ops.search(a, 'dana')).commits[0].hash, fix, 'by author');
+  assert.equal((await ops.search(a, fix.slice(0, 8))).commits[0].hash, fix, 'by hash');
+  assert.deepEqual((await ops.search(a, 'CHECK')).branches.map((b) => b.name), ['feature/checkout']);
+  assert.deepEqual(await ops.search(a, 'x'), { branches: [], commits: [] }, 'too short');
+});
+
 test('compare two branches', async () => {
   const a = sb.repo('compare');
   sb.write(a, 'keep.txt', 'k\n');

@@ -22,6 +22,11 @@ contextBridge.exposeInMainWorld('api', {
   onUpdate: on('app:update'),
   restartToUpdate: () => ipcRenderer.invoke('app:restartToUpdate'),
   version: () => ipcRenderer.invoke('app:version'),
+  ado: {
+    hasToken: () => ipcRenderer.invoke('ado:hasToken'),
+    setToken: (token) => ipcRenderer.invoke('ado:setToken', token),
+    prStatus: (repo, branch) => ipcRenderer.invoke('ado:prStatus', repo, branch),
+  },
   claude: {
     find: () => ipcRenderer.invoke('claude:find'),
     send: (text, opts) => ipcRenderer.invoke('claude:send', text, opts),

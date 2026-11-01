@@ -12,7 +12,7 @@ const MUTATING = new Set([
   'commit', 'discard', 'ignore', 'fetch', 'pull', 'push', 'addRemote', 'createBranch', 'switchBranch', 'checkoutRemote',
   'renameBranch', 'deleteBranch', 'merge', 'undoLastCommit', 'stashSave', 'stashApply', 'stashPop', 'stashDrop',
   'resolveSide', 'saveResolution', 'markResolved', 'abortOp', 'continueOp', 'skipOp', 'cherryPick', 'cherryPickOnto',
-  'clone', 'init', 'setIdentity', 'resetTo', 'restoreBranch', 'stashStore', 'updateFrom', 'revertCommit',
+  'clone', 'init', 'setIdentity', 'resetTo', 'restoreBranch', 'stashStore', 'updateFrom', 'revertCommit', 'finishBranch', 'discardLines', 'applyPatch', 'tidyCommits', 'createTag', 'pushTag', 'deleteTag', 'restoreTag',
 ]);
 let previewSuppressed = 0;
 const CANCELLED = 'CANCELLED';
@@ -91,6 +91,7 @@ const state = {
   lastFetch: {},     // repo -> ms timestamp
   headKey: null,
   branches: null,
+  tags: null,        // tags of the open repo (Branches tab)
   history: null,
   stashes: null,
   selCommit: null,
@@ -109,6 +110,11 @@ const state = {
   previewOpen: false, // a command preview is showing (so nothing is running yet)
   progress: {},       // repo (or 'clone') -> { text, percent } for long operations
   undos: [],          // recent actions that can be undone, newest first (see recordUndo)
+  prStatus: {},       // norm(repo) -> pull request info from Azure DevOps, for the current branch
+  adoToken: false,    // an Azure DevOps token is saved (the token itself stays in the main process)
+  workItem: {},       // "repo|branch" -> work item number typed in the commit box
+  wsQuery: '',        // workspace page: search text
+  branchFilter: '',   // Branches tab: filter text
   histFile: null,     // History: only commits touching this file
   histQuery: '',      // History: search text
 };
@@ -605,10 +611,60 @@ function openWorkspace(id) {
       <button class="btn" data-action="ws-open-editor">Open all in ${esc(editorName())}</button>
       <button class="btn ghost" data-action="add-repo" data-ws="${w.id}">＋ Add repo</button>
     </div>
+    <div class="ws-search-row">
+      <input class="filter ws-search" id="ws-search" placeholder="Find a commit or branch in every repo — message, author, hash or branch name" spellcheck="false" aria-label="Search every repo" value="${esc(state.wsQuery || '')}">
+    </div>
+    <div id="ws-results"></div>
     <div id="ws-align"></div>
     <div id="ws-cards" class="cards"></div>
   </div>`;
   renderWorkspaceCards();
+  let timer = 0;
+  $('#ws-search').addEventListener('input', (e) => {
+    state.wsQuery = e.target.value;
+    clearTimeout(timer);
+    timer = setTimeout(() => searchWorkspace(id), 300);
+  });
+  if (state.wsQuery) searchWorkspace(id);
+}
+
+// Searches every repo of the workspace at once; results are grouped by repo.
+async function searchWorkspace(wsId) {
+  const el = $('#ws-results');
+  const w = currentWs();
+  const q = (state.wsQuery || '').trim();
+  if (!el || !w) return;
+  if (q.length < 2) { el.innerHTML = ''; return; }
+  el.innerHTML = '<div class="ws-results"><span class="spinner sm"></span> Searching…</div>';
+  const repos = w.repos.filter((p) => !state.status[p]?.error && !state.status[p]?.missing);
+  const found = await Promise.all(repos.map(async (repo) => ({ repo, ...(await gitRaw('search', repo, q).catch(() => ({ branches: [], commits: [] }))) })));
+  if ((state.wsQuery || '').trim() !== q || state.view.ws !== wsId || !$('#ws-results')) return;
+  const hits = found.filter((f) => f.branches.length || f.commits.length);
+  const n = hits.reduce((s, f) => s + f.branches.length + f.commits.length, 0);
+  el.innerHTML = `<div class="ws-results">
+    <div class="ws-results-head"><b>${n ? `${plural(n, 'match', 'matches')} in ${plural(hits.length, 'repo')}` : `Nothing matches “${esc(q)}” in any repo.`}</b>
+      <button class="btn small ghost" data-action="ws-search-clear">Clear</button></div>
+    ${hits.map((f) => `<div class="ws-hit-repo"><h3>${esc(basename(f.repo))}</h3>
+      ${f.branches.map((b) => `<button class="ws-hit" data-action="ws-hit-branch" data-repo="${esc(f.repo)}" data-name="${esc(b.name)}">
+        <span>⎇ <b>${esc(b.name)}</b></span><span class="muted small">${b.remote ? 'branch on the server' : 'branch'}</span></button>`).join('')}
+      ${f.commits.map((c) => `<button class="ws-hit" data-action="ws-hit-commit" data-repo="${esc(f.repo)}" data-hash="${c.hash}" data-on="${esc(c.on || '')}">
+        <span><span class="mono">${c.short}</span> ${esc(c.subject)}</span>
+        <span class="muted small">${esc(c.author)} · ${timeAgo(c.date)}${c.on ? ` · on ${esc(c.on)}` : ''}</span></button>`).join('')}
+    </div>`).join('')}
+  </div>`;
+}
+
+// Opens a search result: the commit in the History of the branch it's on.
+function openCommitIn(repo, hash, on) {
+  openRepo(repo, state.view.ws);
+  const cur = state.status[repo]?.branch;
+  state.histRef = on && on !== cur ? on : null;
+  state.histNotIn = false;
+  state.histFile = null;
+  state.histQuery = '';
+  state.selCommit = hash;
+  state.history = null;
+  setTab('history');
 }
 
 // The classic multi-repo mistake: building api on feature/x against web on main. Point it out.
@@ -616,11 +672,16 @@ function renderAlignment() {
   const el = $('#ws-align');
   const w = currentWs();
   if (!el || !w) return;
+  const gone = w.repos.filter((p) => state.status[p]?.upstreamGone && state.status[p]?.branch);
+  const finish = gone.length ? `<div class="banner info ws-banner"><div><div class="banner-title">${plural(gone.length, 'branch was', 'branches were')} deleted on the server</div>
+    <div>${gone.map((p) => `<b>${esc(basename(p))}</b> → ${esc(state.status[p].branch)}`).join(' · ')}</div>
+    <div class="hint">That usually means their pull requests were completed.</div></div>
+    <div class="banner-actions"><button class="btn primary" data-action="ws-finish">✓ Finish them…</button></div></div>` : '';
   const on = w.repos.map((p) => ({ p, b: state.status[p]?.branch })).filter((x) => x.b);
   const names = [...new Set(on.map((x) => x.b))];
-  if (on.length < 2 || names.length < 2) { el.innerHTML = ''; return; }
+  if (on.length < 2 || names.length < 2) { el.innerHTML = finish; return; }
   const counts = names.map((n) => [n, on.filter((x) => x.b === n).length]).sort((a, b) => b[1] - a[1]);
-  el.innerHTML = `<div class="banner info ws-banner"><div><div class="banner-title">These repos are on different branches</div>
+  el.innerHTML = finish + `<div class="banner info ws-banner"><div><div class="banner-title">These repos are on different branches</div>
     <div>${on.map((x) => `<b>${esc(basename(x.p))}</b> → ${esc(x.b)}`).join(' · ')}</div>
     <div class="hint">That's fine if it's on purpose — but if you're working on one feature across repos, they usually belong on the same branch.</div></div>
     <div class="banner-actions"><button class="btn primary" data-action="ws-switch" data-preset="${esc(counts[0][0])}">Line them up…</button></div></div>`;
@@ -631,6 +692,7 @@ function syncText(st) {
   if (st.detached) return 'Not on a branch';
   if (st.initial) return 'No commits yet';
   if (!st.hasRemote) return 'No server set up — this repo only exists on your computer';
+  if (st.upstreamGone) return 'Deleted on the server';
   if (!st.upstream) return 'This branch isn\'t on the server yet — click <b>Publish branch</b> to share it';
   const bits = [];
   if (st.ahead) bits.push(`<b>${st.ahead}</b> to send`);
@@ -686,10 +748,12 @@ function openRepo(repo, wsId, tab) {
   state.view = { type: 'repo', path: repo, ws: wsId };
   ensureTab({ type: 'repo', path: repo, ws: wsId });
   if (switching) {
-    state.branches = state.history = state.stashes = null;
+    state.branches = state.tags = state.history = state.stashes = null;
     state.selCommit = state.selStash = state.conflict = null;
     state.histRef = null;
     state.cmp = null;
+    state.branchFilter = state.branchFilter && tab === 'branches' ? state.branchFilter : '';
+    state.blame = false;
     state.picks.clear();
     state.headKey = `${st.branch}|${st.oid}`;
   }
@@ -698,6 +762,7 @@ function openRepo(repo, wsId, tab) {
   $('#view').innerHTML = '<div class="repo-view"><div id="repo-header" class="repo-header"></div><div id="op-banner"></div><div id="tabs" class="tabs"></div><div id="tab-body" class="tab-body"></div></div>';
   updateRepoChrome();
   renderTab();
+  loadPrStatus(repo);
 }
 
 function updateRepoChrome() {
@@ -719,6 +784,7 @@ function updateRepoView() {
   else if (state.tab === 'branches' && headChanged) loadBranches();
   else if (state.tab === 'history' && headChanged) loadHistory();
   else if (state.tab === 'compare' && headChanged) loadCompare();
+  if (headChanged) loadPrStatus(currentRepo());
   else if (state.tab === 'shelf') loadShelf();
 }
 
@@ -736,7 +802,7 @@ function repoHeaderHtml(repo) {
   const checked = state.lastFetch[repo] ? `checked ${timeAgo(state.lastFetch[repo] / 1000)}` : '';
   const sync = syncText(st);
   const noServer = !st.hasRemote && !st.detached;
-  const prable = st.upstream && !st.ahead && !['main', 'master', 'develop'].includes(st.branch);
+  const prable = st.upstream && !st.upstreamGone && !st.ahead && !['main', 'master', 'develop'].includes(st.branch);
   const pushBtn = noServer
     ? `<button class="btn ${st.initial ? '' : 'primary'}" data-action="add-remote" data-repo="${esc(repo)}" ${d} title="git remote add — connect this repo to a server such as GitHub">⇪ Add server…</button>`
     : `<button class="btn ${st.ahead || (!st.upstream && !st.initial && !st.detached) ? 'primary' : ''}" data-action="push" data-repo="${esc(repo)}" ${d} title="git push — uploads your commits to the server">↑ ${st.upstream || st.detached ? 'Send' : 'Publish branch'}${st.ahead ? ` (${st.ahead})` : ''}</button>`;
@@ -744,9 +810,10 @@ function repoHeaderHtml(repo) {
     <div class="rh-bar">
       <button class="branch-pill" data-action="branch-switcher" data-repo="${esc(repo)}" title="Switch to another branch, or create one" aria-haspopup="dialog">⎇ <b>${esc(branchLabel)}</b> <span class="pill-action">Switch branch ▾</span></button>
       <div class="sync-text" title="${esc(sync.replace(/<[^>]+>/g, ''))}">${sync}${checked ? ` <span class="muted small">(${checked})</span>` : ''}</div>
+      ${prChipHtml(repo)}
       <div class="spacer"></div>
       ${busyHtml(repo)}
-      ${prable ? `<button class="btn ghost" data-action="open-pr" data-repo="${esc(repo)}" title="Open the page for a pull request from ${esc(st.branch)}">⇄ Pull request</button>` : ''}
+      ${prable && state.prStatus[norm(repo)]?.status !== 'active' ?`<button class="btn ghost" data-action="open-pr" data-repo="${esc(repo)}" title="Open the page for a pull request from ${esc(st.branch)}">⇄ Pull request</button>` : ''}
       ${noServer ? '' : `<button class="btn" data-action="fetch" data-repo="${esc(repo)}" ${d} title="git fetch — asks the server what's new. Doesn't change any of your files.">⟳ Check for updates</button>
       <button class="btn ${st.behind ? 'primary' : ''}" data-action="pull" data-repo="${esc(repo)}" ${d} title="git pull — downloads new commits from the server into this branch">↓ Get latest${st.behind ? ` (${st.behind})` : ''}</button>`}
       ${pushBtn}
@@ -783,6 +850,13 @@ function bannerHtml(repo) {
     return `<div class="banner info"><div><div class="banner-title">You're not on a branch ("detached HEAD")</div>
       <div>You're looking at an old snapshot. Any commits you make here won't belong to a branch and are easy to lose.</div></div>
       <div class="banner-actions"><button class="btn" data-action="tab" data-tab="branches">Go back to a branch</button><button class="btn primary" data-action="new-branch" data-repo="${r}">Create a branch here</button></div></div>`;
+  }
+  const pr = state.prStatus[norm(repo)];
+  const prDone = pr?.branch === st.branch && pr.status === 'completed';
+  if (st.branch && (st.upstreamGone || prDone)) {
+    return `<div class="banner info"><div><div class="banner-title">${prDone ? `Pull request #${pr.id} for ${esc(st.branch)} is completed` : `${esc(st.branch)} was deleted on the server`}</div>
+      <div>${prDone ? 'Its work is in the main branch now.' : 'That usually means its pull request was completed.'} Finish up: switch to the main branch, get its latest, and delete ${esc(st.branch)} here.</div></div>
+      <div class="banner-actions"><button class="btn primary" data-action="finish-branch" data-repo="${r}" title="git switch, git pull, git branch -D">✓ Finish branch…</button></div></div>`;
   }
   return '';
 }
@@ -846,6 +920,7 @@ function renderChangesTab() {
           <div class="spacer"></div><button class="btn small ghost" data-action="write-message" title="Let Claude write a message from the ticked changes">✦ Write message</button></div>` : ''}
         <input id="commit-summary" placeholder="Summary (required) — e.g. Fix login button" maxlength="200" value="${esc(msg.summary)}" spellcheck="true" aria-label="Commit summary">
         <textarea id="commit-body" rows="2" placeholder="Description (optional)" aria-label="Commit description">${esc(msg.body)}</textarea>
+        ${state.config.settings.workItems !== false ? `<label class="wi-row" title="Adds AB#&lt;number&gt; to the commit message, which links the commit to that work item in Azure Boards"><span>Work item</span><span class="muted">AB#</span><input id="work-item" inputmode="numeric" placeholder="none" spellcheck="false" aria-label="Azure Boards work item number"></label>` : ''}
         <label class="check amend-row" id="amend-row" hidden title="git commit --amend"><input type="checkbox" id="amend" data-action="amend-toggle"> <span>Add to my last commit instead (amend) — <span class="muted" id="amend-what"></span></span></label>
         <div class="commit-actions">
           <button class="btn primary grow" id="commit-btn" data-action="commit" title="git commit — Ctrl+Enter">Commit</button>
@@ -894,7 +969,9 @@ function renderFileList() {
   $('#changes-head').innerHTML = files.length ? `
     <label class="check" title="Tick or untick everything"><input type="checkbox" data-action="check-all" ${n === files.length ? 'checked' : ''}> <span>${plural(files.length, 'changed file')}</span></label>
     <div class="spacer"></div>
-    <button class="btn small ghost" data-action="shelve" data-repo="${esc(repo)}" title="git stash — set all your changes aside so your folder is clean">Put all on Shelf</button>
+    ${n && n < files.length
+      ? `<button class="btn small ghost" data-action="shelve-ticked" title="git stash push -- <files> — set the ticked files' changes aside">Put ticked on Shelf</button>`
+      : `<button class="btn small ghost" data-action="shelve" data-repo="${esc(repo)}" title="git stash — set all your changes aside so your folder is clean">Put all on Shelf</button>`}
     <button class="btn small ghost danger-text" data-action="discard-checked" ${n ? '' : 'disabled'}>Discard ticked…</button>` : '';
   const all = $('[data-action=check-all]');
   if (all) all.indeterminate = n > 0 && n < files.length;
@@ -926,11 +1003,22 @@ function renderFileList() {
   updateCommitButtons();
 }
 
+// The work item box follows the branch: what you typed for it, else the number in its name.
+const workItemKey = (repo, branch) => `${norm(repo)}|${branch}`;
+function syncWorkItem(repo, st) {
+  const input = $('#work-item');
+  const key = workItemKey(repo, st.branch);
+  if (!input || input.dataset.key === key) return;
+  input.dataset.key = key;
+  input.value = state.workItem[key] ?? workItemFromBranch(st.branch) ?? '';
+}
+
 function updateCommitButtons() {
   const repo = currentRepo();
   const btn = $('#commit-btn');
   if (!btn) return;
   const st = state.status[repo] || {};
+  syncWorkItem(repo, st);
   const files = changedFiles(st);
   const n = files.filter((f) => state.checked[repo]?.[f.path]).length;
   const summary = $('#commit-summary').value.trim();
@@ -979,7 +1067,7 @@ async function refreshDiff() {
       ${pickable ? `<span class="muted small" id="pick-count">${split ? 'Switch to Inline to commit only some lines.' : ''}</span>` : ''}
       <div class="spacer"></div>
       ${diffModeToggle()}
-      ${f.untracked ? '' : `<button class="btn small ghost" data-action="file-history" data-path="${esc(f.path)}" title="Every commit that changed this file">History</button>`}
+      ${f.untracked ? '' : `<button class="btn small ghost" data-action="file-history" data-path="${esc(f.path)}" title="Every commit that changed this file">History</button><button class="btn small ghost" data-action="file-blame" data-path="${esc(f.path)}" title="git blame — who last changed each line">Blame</button>`}
       <button class="btn small ghost" data-action="open-file" data-path="${esc(f.path)}">Open in ${esc(editorName())}</button>
     </div>
     <div class="diff-scroll">${d.kind === 'text' ? renderDiff(d.text, { file: f.path, picked: pickable ? (k) => isPicked(repo, f.path, k) : null }) : diffBody(d, f.path)}</div>`;
@@ -1046,6 +1134,21 @@ function syncPickBoxes() {
   }
 }
 
+// Throws away one block of changes in the file shown in the diff.
+async function discardBlock(h) {
+  const k = state.diffKeys;
+  if (!k) return;
+  const keys = [...document.querySelectorAll(`#diff-pane .dl[data-h="${h}"] [data-action=pick-line]`)].map((b) => b.dataset.key);
+  if (!keys.length) return;
+  const ok = await confirmBox('Discard this block?', `<p>Throw away ${plural(keys.length, 'changed line')} in <code>${esc(k.path)}</code>, putting ${keys.length === 1 ? 'it' : 'them'} back to your last commit? The rest of the file is left alone.</p>
+    <p class="hint">Changed your mind? <b>Undo</b> puts them back.</p>`, 'Discard block', true);
+  if (!ok) return;
+  try {
+    const { patch } = await busy(k.repo, 'Discarding…', () => git('discardLines', k.repo, k.path, keys));
+    undoToast('Block discarded.', k.repo, `discard of a block in ${basename(k.path)}`, () => git('applyPatch', k.repo, patch));
+  } catch (e) { showError("Couldn't discard", e); }
+}
+
 // After ticking lines: update the file list and commit button to match.
 function afterPick() {
   syncPickBoxes();
@@ -1096,7 +1199,8 @@ function renderDiff(text, { maxLines = 6000, file = '', picked = null } = {}) {
       hunkNo++;
       if (picking) for (const r of h.rows) if (r.kind !== 'ctx') r.key = key(r.kind, r.text);
       const hunkBox = picking ? `<span class="lp"><input type="checkbox" data-action="pick-hunk" data-h="${hunkNo}" title="Tick or untick this whole block" aria-label="Include this block in the commit"></span>` : '';
-      out.push(split ? `<div class="sr gap hunk-gap">${esc(h.ctx) || '⋯'}</div>` : `<div class="dl hunk">${hunkBox}${ln('⋯')}${ln('⋯')}<span class="code">${esc(h.ctx)}</span></div>`);
+      const discard = picking ? `<button class="btn small ghost hunk-discard" data-action="discard-hunk" data-h="${hunkNo}" title="Throw away the changes in this block (Undo puts them back)">↺ Discard block</button>` : '';
+      out.push(split ? `<div class="sr gap hunk-gap">${esc(h.ctx) || '⋯'}</div>` : `<div class="dl hunk">${hunkBox}${ln('⋯')}${ln('⋯')}<span class="code">${esc(h.ctx)}</span>${discard}</div>`);
       for (const g of pairHunk(h.rows)) {
         if (++count > maxLines) { out.push('<div class="dnote">… the rest is too long to show here. Open the file in your editor.</div>'); break; }
         if (g.kind === 'ctx') {
@@ -1143,7 +1247,7 @@ async function doCommit(repo, thenPush) {
   const amend = !!$('#amend')?.checked;
   if (!ticked.length && !amend) return;
   const paths = ticked.flatMap((f) => (f.orig ? [f.path, f.orig] : [f.path]));
-  const message = body ? `${summary}\n\n${body}` : summary;
+  const message = withWorkItem(body ? `${summary}\n\n${body}` : summary, $('#work-item')?.value);
   // Files with some lines left out: { file: [keys of the left-out lines] }.
   const partial = st.op ? null : Object.fromEntries(ticked.filter((f) => partlyPicked(repo, f.path)).map((f) => [f.path, [...state.excluded[repo][f.path]]]));
   const some = partial && Object.keys(partial).length ? partial : null;
@@ -1171,6 +1275,7 @@ async function doFetch(repo, { silent = false } = {}) {
     const st = state.status[repo];
     if (!silent) toast(st.behind ? `${plural(st.behind, 'new commit')} on the server for ${st.branch}.` : `${basename(repo)}: nothing new on the server.`, st.behind ? 'info' : 'ok');
     if (state.tab === 'branches' && samePath(repo, currentRepo())) loadBranches();
+    loadPrStatus(repo, true);
   } catch (e) { if (!silent) showError("Couldn't check for updates", e); else throw e; }
 }
 
@@ -1211,6 +1316,7 @@ async function doPush(repo) {
       }
       return false;
     }
+    loadPrStatus(repo, true);
     const msg = r.published ? 'Branch published to the server.' : 'Sent to the server.';
     // The natural next step after sending a feature branch is a pull request.
     if (r.branch && !['main', 'master', 'develop'].includes(r.branch)) {
@@ -1263,7 +1369,7 @@ async function afterMaybeConflict(repo, r, successMsg) {
 // ---------- branches ----------
 async function loadBranches() {
   const repo = currentRepo();
-  try { state.branches = await git('branches', repo); }
+  try { [state.branches, state.tags] = await Promise.all([git('branches', repo), gitRaw('tags', repo).catch(() => [])]); }
   catch (e) { state.branches = { error: e.message }; }
   if (state.tab === 'branches' && samePath(currentRepo(), repo)) renderBranchesTab();
 }
@@ -1318,11 +1424,25 @@ function renderBranchesTab() {
     <h3>On the server only <span class="muted small">(${b.remoteOnly.length})</span></h3>
     <p class="hint">These exist on the server but you haven't got them as a branch here. “Switch to” downloads one. Click <b>Check for updates</b> to refresh this list.</p>
     <div class="rows">${remote || '<div class="muted pad">None.</div>'}</div>
+    <h3>Tags <span class="muted small">(${(state.tags || []).length})</span></h3>
+    <p class="hint">A <b>tag</b> is a permanent label on one commit, usually a release like v1.2.0. Add one from a commit in History.</p>
+    <div class="rows">${(state.tags || []).map((t) => `<div class="row" data-name="${esc(t.name)}">
+      <div class="row-main"><div class="row-title">🏷 ${esc(t.name)}</div>
+        <div class="row-sub"><span class="mono">${t.commit.slice(0, 7)}</span>${t.message ? ` · ${esc(t.message)}` : ''}${t.date ? ` · ${timeAgo(t.date)}` : ''}</div></div>
+      <div class="row-actions">
+        ${st.hasRemote ? `<button class="btn small ghost" data-action="push-tag" data-name="${esc(t.name)}" title="git push origin ${esc(t.name)}">↑ Send</button>` : ''}
+        <button class="btn small ghost danger-text" data-action="delete-tag" data-name="${esc(t.name)}">Delete…</button>
+      </div></div>`).join('') || '<div class="muted pad">No tags yet.</div>'}</div>
   </div>`;
-  $('#branch-filter').addEventListener('input', (e) => {
-    const q = e.target.value.toLowerCase();
+  const filter = $('#branch-filter');
+  const apply = () => {
+    const q = filter.value.toLowerCase();
+    state.branchFilter = filter.value;
     body.querySelectorAll('.row[data-name]').forEach((r) => { r.style.display = r.dataset.name.toLowerCase().includes(q) ? '' : 'none'; });
-  });
+  };
+  filter.value = state.branchFilter || '';
+  filter.addEventListener('input', apply);
+  if (filter.value) apply();
 }
 
 const branchTransform = (v) => v.replace(/\s+/g, '-');
@@ -1488,16 +1608,90 @@ async function updateFrom(repo) {
   } catch (e) { showError(`Couldn't update from ${ref}`, e); }
 }
 
+// When a branch's work is merged: go to the main branch, get its latest, delete the branch.
+async function finishBranch(repo) {
+  const st = state.status[repo] || {};
+  if (st.op) { toast('Finish or abort what is in progress first (see the yellow banner).', 'warn'); return; }
+  if (!st.branch) { toast("You're not on a branch.", 'warn'); return; }
+  const target = await gitRaw('defaultBranch', repo).catch(() => null);
+  if (!target || target === st.branch) { toast(`${st.branch} is the main branch, so there's nothing to finish.`, 'info'); return; }
+  const dirty = changedFiles(st).length;
+  const onServer = st.upstream && !st.upstreamGone;
+  const r = await modal({
+    title: `Finish ${st.branch}?`,
+    body: `<ol class="steps">
+        <li>Switch to <b>${esc(target)}</b> and get its latest${st.hasRemote ? ' from the server' : ''}.</li>
+        <li>Delete <b>${esc(st.branch)}</b> on your computer. (Undo can bring it back.)</li>
+      </ol>
+      ${onServer ? `<label class="check"><input type="checkbox" name="remote"> Also delete it on the server (${esc(st.upstream)})</label>` : ''}
+      ${dirty ? `<p class="hint">You have ${plural(dirty, 'uncommitted change')} on this branch. They'll be put on the Shelf first, so nothing is lost.</p>` : ''}`,
+    buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'ok', label: '✓ Finish branch', kind: 'primary' }],
+  });
+  if (r.id !== 'ok') return;
+  const opts = { deleteRemote: !!r.values.remote };
+  try {
+    if (dirty) await git('stashSave', repo, `[auto] ${st.branch}: set aside when finishing the branch`);
+    let res = await busy(repo, `Finishing ${st.branch}…`, () => git('finishBranch', repo, opts));
+    if (res.needsForce) {
+      const go = await confirmBox(`${st.branch} isn't in ${res.target} as-is`, `<p>Its commits aren't in <b>${esc(res.target)}</b> exactly as they are here. That's normal when a pull request is <b>squashed</b> on merge${st.upstreamGone ? ', and the server has already deleted the branch, so it was most likely merged' : ''}.</p>
+        <p>Delete it anyway? Undo can bring it back afterwards.</p>`, 'Delete it anyway', true);
+      if (!go) return;
+      res = await busy(repo, `Finishing ${st.branch}…`, () => git('finishBranch', repo, { ...opts, force: true }));
+    }
+    undoToast(`Finished ${res.branch}. You're on ${res.target}${res.pulled === false ? " (couldn't get its latest — try Get latest)" : ''}.`, repo, `finish of ${res.branch}`, async () => {
+      await git('restoreBranch', repo, res.branch, res.oid);
+      await git('switchBranch', repo, res.branch);
+    });
+    if (samePath(repo, currentRepo()) && state.tab === 'branches') loadBranches();
+  } catch (e) { showError(`Couldn't finish ${st.branch}`, e); }
+}
+
+// Workspace: finish every repo whose branch was deleted on the server.
+async function wsFinish() {
+  const repos = currentWs().repos.filter((p) => state.status[p]?.upstreamGone && state.status[p]?.branch);
+  if (!repos.length) return;
+  const r = await modal({
+    title: 'Finish merged branches',
+    body: `<p>These branches were deleted on the server, which usually means their pull requests were completed. For each one: switch to the main branch, get its latest, and delete the branch here.</p>
+      <div class="field">${repos.map((p) => `<label class="check"><input type="checkbox" name="repos" data-multi="1" value="${esc(p)}" checked> <b>${esc(basename(p))}</b> <span class="muted small">${esc(state.status[p].branch)}</span></label>`).join('')}</div>
+      <p class="hint">Repos with uncommitted changes, or whose commits aren't in the main branch as-is (e.g. squashed), are skipped — open them to finish.</p>`,
+    buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'ok', label: '✓ Finish', kind: 'primary' }],
+  });
+  if (r.id !== 'ok' || !r.values.repos?.length) return;
+  const done = [];
+  const results = await forEachRepo('Finishing…', r.values.repos, async (repo) => {
+    if (changedFiles(state.status[repo]).length) return { ok: false, warn: true, msg: 'skipped — has uncommitted changes; open this repo to finish it' };
+    const res = await git('finishBranch', repo, {});
+    if (res.needsForce) return { ok: false, warn: true, msg: `${res.branch}'s commits aren't in ${res.target} as-is (squashed?) — open this repo to finish it` };
+    done.push({ repo, ...res });
+    return { ok: true, msg: `finished ${res.branch}, now on ${res.target}` };
+  }, (repo) => ['finishBranch', repo, {}]);
+  if (!results) return;
+  if (done.length) {
+    recordUndo({
+      label: `finish of ${plural(done.length, 'branch', 'branches')}`,
+      repos: done.map((d) => d.repo),
+      run: async () => {
+        for (const d of done) { await git('restoreBranch', d.repo, d.branch, d.oid); await git('switchBranch', d.repo, d.branch); }
+        await refreshAll();
+      },
+    });
+  }
+  resultsModal('Finish branches — results', results, done.length ? 'Changed your mind? <b>↶ Undo…</b> brings the branches back.' : '');
+}
+
 async function branchMenu(repo, name) {
   const b = state.branches?.local.find((x) => x.name === name);
   if (!b) return;
   const cur = state.status[repo]?.branch;
   const c = await choose(name, '', [
     ...(b.current || !cur ? [] : [{ id: 'compare', label: `Compare with ${cur}`, desc: `See what ${esc(name)} has that ${esc(cur)} doesn't.` }]),
+    ...(b.current ? [{ id: 'finish', label: 'Finish this branch…', desc: 'After its pull request: switch to the main branch, get its latest, and delete this branch.' }] : []),
     { id: 'rename', label: 'Rename…' },
     ...(b.current ? [] : [{ id: 'delete', label: 'Delete…', desc: 'Removes the branch from your computer (and optionally the server).', kind: 'danger' }]),
   ]);
   if (c === 'compare') showCompare(cur, name);
+  else if (c === 'finish') finishBranch(repo);
   else if (c === 'rename') {
     const nn = await ask(`Rename ${name}`, { label: 'New name', value: name, transform: branchTransform, okLabel: 'Rename', help: b.upstream ? "Note: this only renames it on your computer. The server still has the old name." : '' });
     if (!nn || nn === name) return;
@@ -1623,7 +1817,9 @@ function renderHistoryTab() {
       </select>
       ${ref ? `<label class="check"><input type="checkbox" data-action="hist-notin" ${state.histNotIn ? 'checked' : ''}> Hide commits already in ${esc(cur)}</label>` : ''}
       <input class="filter" id="hist-search" placeholder="Search message, author or hash…" value="${esc(state.histQuery)}" spellcheck="false" aria-label="Search commits">
-      ${state.histFile ? `<span class="chip on" title="${esc(state.histFile)}">Only changes to ${esc(basename(state.histFile))} <button class="chip-x" data-action="clear-file-history" aria-label="Show all commits">✕</button></span>` : ''}
+      ${state.histFile ? `<span class="chip on" title="${esc(state.histFile)}">Only changes to ${esc(basename(state.histFile))} <button class="chip-x" data-action="clear-file-history" aria-label="Show all commits">✕</button></span>
+        <div class="seg small" role="group" aria-label="Right-hand side shows"><button class="seg-btn ${state.blame ? '' : 'active'}" data-action="blame-mode" data-on="">Commit details</button><button class="seg-btn ${state.blame ? 'active' : ''}" data-action="blame-mode" data-on="1" title="git blame">Who changed each line</button></div>` : ''}
+      ${!ref && !state.histFile && st.branch ? `<button class="btn ghost" data-action="tidy-commits" title="Combine, reword or drop commits you haven't sent yet (git rebase -i)">✎ Tidy unsent commits…</button>` : ''}
       <div class="spacer"></div>
       <div id="pick-bar" class="pick-bar"></div>
     </div>
@@ -1654,7 +1850,43 @@ function renderHistoryTab() {
     <div class="pane-right" id="commit-pane"></div>
   </div>`;
   bind();
-  loadCommitDetails();
+  if (state.histFile && state.blame) loadBlame();
+  else loadCommitDetails();
+}
+
+// "Who changed each line" for the file History is showing: lines grouped by the commit that last changed them.
+async function loadBlame() {
+  const repo = currentRepo();
+  const file = state.histFile;
+  const pane = $('#commit-pane');
+  if (!pane || !file) return;
+  pane.innerHTML = '<div class="empty muted"><span class="spinner"></span></div>';
+  let b;
+  try { b = await gitRaw('blame', repo, file); }
+  catch (e) { pane.innerHTML = `<pre class="raw">${esc(e.message)}</pre>`; return; }
+  if (!$('#commit-pane') || state.histFile !== file || !state.blame) return;
+  const groups = [];
+  for (const l of b.lines) {
+    const g = groups[groups.length - 1];
+    if (g && g.hash === l.hash) g.lines.push(l);
+    else groups.push({ hash: l.hash, lines: [l] });
+  }
+  const lang = langOf(file);
+  // Each group of lines gets a header saying which commit last changed them (fits any width).
+  const head = (g) => {
+    if (/^0+$/.test(g.hash)) return '<div class="bl-head"><span class="muted">Not committed yet</span></div>';
+    const c = b.commits[g.hash];
+    const from = g.lines[0].n;
+    const to = g.lines[g.lines.length - 1].n;
+    return `<div class="bl-head"><button class="bl-hash mono" data-action="blame-commit" data-hash="${g.hash}" title="Show this commit">${g.hash.slice(0, 7)}</button>
+      <span class="bl-sum" title="${esc(c.summary)}">${esc(c.summary)}</span>
+      <span class="bl-who">${esc(c.author)} · ${timeAgo(c.time)}</span>
+      <button class="icon-btn bl-explain" data-action="blame-explain" data-hash="${g.hash}" data-from="${from}" data-to="${to}" title="Ask Claude why these lines were changed">✦</button></div>`;
+  };
+  const html = groups.map((g) => `<div class="bl-group">${head(g)}${g.lines.map((l) => `<div class="bl"><span class="ln">${l.n}</span><span class="code">${highlight(l.text, lang) || ' '}</span></div>`).join('')}</div>`).join('');
+  const shaped = Object.keys(b.commits).filter((h) => !/^0+$/.test(h)).length;
+  pane.innerHTML = `<div class="diff-head"><b>${esc(file)}</b><span class="muted small">${plural(shaped, 'commit')} shaped this file as it is now${b.truncated ? ' (showing the first 20,000 lines)' : ''}</span></div>
+    <div class="diff-scroll blame-scroll"><div class="blame">${html}</div></div>`;
 }
 
 // Search hides non-matching rows (and the graph, whose lines would no longer join up).
@@ -1767,7 +1999,8 @@ async function loadCommitDetails() {
   if (state.selCommit !== hash || !$('#commit-pane')) return;
   const h = state.history;
   const isHead = !state.histRef && h.commits[0]?.hash === hash;
-  const canUndo = isHead && d.parents.length === 1 && (!h.upstream || h.unpushed.includes(hash));
+  // A branch whose server copy was deleted has no upstream to compare with, but its commits were sent.
+  const canUndo = isHead && d.parents.length === 1 && !state.status[repo]?.upstreamGone && (!h.upstream || h.unpushed.includes(hash));
   const inList = h.commits.some((c) => c.hash === hash);
   const cur = state.status[repo]?.branch || 'here';
   const [subject, ...rest] = d.message.split('\n');
@@ -1779,11 +2012,153 @@ async function loadCommitDetails() {
         <button class="btn small ghost" data-action="explain-commit" data-hash="${d.hash}" data-subject="${esc(subject)}" title="Ask Claude to explain this commit">✦ Explain</button>
         ${state.histRef ? `<button class="btn small primary" data-action="cherry-pick-one" data-hash="${d.hash}" title="git cherry-pick">🍒 Cherry-pick into ${esc(cur)}</button>` : ''}
         <button class="btn small" data-action="cherry-pick-to-one" data-hash="${d.hash}">Copy to another branch…</button>
+        <button class="btn small ghost" data-action="add-tag" data-hash="${d.hash}" title="git tag — put a permanent label (like v1.2.0) on this commit">🏷 Add tag…</button>
         ${!state.histRef && !canUndo ? `<button class="btn small" data-action="revert-commit" data-hash="${d.hash}" data-subject="${esc(subject)}" title="git revert — a new commit that does the opposite">↺ Reverse this commit…</button>` : ''}
         ${canUndo ?`<button class="btn small" data-action="undo-commit" title="git reset --soft HEAD~1">↶ Undo this commit</button><span class="hint">Undo keeps your changes (they go back to the Changes tab). Possible because it hasn't been sent yet.</span>` : ''}
       </div>` : ''}
     </div>
     <div class="diff-scroll">${renderDiff(d.diff)}</div>`;
+}
+
+// ---------- Azure DevOps pull request status ----------
+// Fetched by the main process (which holds the token); refreshed at most every 5 minutes per branch
+// unless `force` (after Check for updates or Send).
+const prLoaded = {}; // norm(repo) -> { branch, time }
+async function loadPrStatus(repo, force = false) {
+  const st = state.status[repo] || {};
+  if (!state.adoToken || !repo || !st.branch || !st.hasRemote) return;
+  const k = norm(repo);
+  const last = prLoaded[k];
+  if (!force && last && last.branch === st.branch && Date.now() - last.time < 5 * 60000) return;
+  prLoaded[k] = { branch: st.branch, time: Date.now() };
+  const r = await api.ado.prStatus(repo, st.branch);
+  const data = r.ok ? r.data : { error: r.error, code: r.code };
+  if (data.supported === false || data.noToken) delete state.prStatus[k];
+  else state.prStatus[k] = { ...data, branch: st.branch };
+  if (samePath(repo, currentRepo()) && $('#repo-header')) updateRepoChrome();
+}
+
+function prChipHtml(repo) {
+  const st = state.status[repo] || {};
+  const pr = state.prStatus[norm(repo)];
+  if (!pr || pr.branch !== st.branch || pr.none) return '';
+  if (pr.error) return `<span class="pr-chip muted" title="${esc(pr.error)}">PR status unavailable</span>`;
+  const open = (label, cls, tip) => `<button class="pr-chip ${cls}" data-action="open-pr-web" data-url="${esc(pr.url)}" title="${esc(tip)}">${label}</button>`;
+  if (pr.status === 'completed') return open(`PR #${pr.id} completed ✓`, 'ok', `${pr.title} — merged into ${pr.target}`);
+  if (pr.status === 'abandoned') return open(`PR #${pr.id} abandoned`, 'muted', pr.title);
+  const bits = [];
+  if (pr.rejected) bits.push('✕ rejected');
+  else if (pr.waiting) bits.push('↺ changes asked');
+  else if (pr.approved) bits.push(`✓ ${pr.approved} approved`);
+  else bits.push('waiting for review');
+  const b = pr.checks?.builds;
+  if (b?.failed) bits.push('✕ build failed');
+  else if (b?.running) bits.push('⏳ build running');
+  else if (b?.total && b.passed === b.total) bits.push('✓ build passed');
+  const bad = pr.rejected || b?.failed;
+  const good = !bad && pr.approved && pr.checks && !pr.checks.blocking;
+  const reviewers = pr.reviewers.map((r) => `${r.name}: ${r.vote >= 10 ? 'approved' : r.vote >= 5 ? 'approved with suggestions' : r.vote === -5 ? 'waiting for author' : r.vote === -10 ? 'rejected' : 'no vote yet'}`).join('\n');
+  return open(`PR #${pr.id}${pr.draft ? ' (draft)' : ''} · ${bits.join(' · ')}`, bad ? 'bad' : good ? 'ok' : '', `${pr.title} → ${pr.target}${reviewers ? `\n\n${reviewers}` : ''}${good ? '\n\nReady to complete.' : ''}`);
+}
+
+// ---------- tags ----------
+async function addTag(repo, hash) {
+  const st = state.status[repo] || {};
+  const r = await modal({
+    title: 'Add a tag',
+    body: `<label class="field"><span>Tag name</span><input name="name" placeholder="e.g. v1.2.0" spellcheck="false"></label>
+      <label class="field"><span>Message (optional — makes a release-style tag with your name and the date)</span><textarea name="message" rows="2" placeholder="e.g. First public release"></textarea></label>
+      ${st.hasRemote ? '<label class="check"><input type="checkbox" name="send" checked> Send it to the server straight away</label>' : ''}
+      <p class="hint">On commit <span class="mono">${hash.slice(0, 7)}</span>.</p>`,
+    buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'ok', label: '🏷 Add tag', kind: 'primary' }],
+    init: (el) => { const i = el.querySelector('[name=name]'); i.addEventListener('input', () => { i.value = i.value.replace(/\s+/g, '-'); }); },
+  });
+  const name = r.values.name?.trim();
+  if (r.id !== 'ok' || !name) return;
+  if (!(await gitRaw('checkTagName', name))) { showError('Invalid tag name', new Error(`'${name}' is not a valid tag name. Use letters, numbers, dots and dashes, e.g. v1.2.0.`)); return; }
+  try {
+    await busy(repo, 'Tagging…', () => git('createTag', repo, name, hash, r.values.message.trim()));
+    if (r.values.send) await busy(repo, 'Sending tag…', () => git('pushTag', repo, name));
+    toast(`Tagged ${hash.slice(0, 7)} as ${name}${r.values.send ? ' and sent it to the server' : ''}.`, 'ok');
+    if (state.tab === 'history') loadHistory();
+  } catch (e) { showError("Couldn't add the tag", e); }
+}
+
+async function deleteTag(repo, name) {
+  const st = state.status[repo] || {};
+  const r = await modal({
+    title: `Delete the tag ${name}?`,
+    body: `<p>The commit itself isn't touched — only the label is removed.</p>
+      ${st.hasRemote ? '<label class="check"><input type="checkbox" name="remote"> Also delete it on the server</label>' : ''}`,
+    buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'ok', label: 'Delete', kind: 'danger' }],
+  });
+  if (r.id !== 'ok') return;
+  try {
+    const { oid } = await git('deleteTag', repo, name, { remote: !!r.values.remote });
+    undoToast(`Deleted the tag ${name}${r.values.remote ? ' (here and on the server)' : ''}.`, repo, `delete of the tag ${name}`, async () => {
+      await git('restoreTag', repo, name, oid);
+      if (r.values.remote) await git('pushTag', repo, name);
+      loadBranches();
+    });
+    loadBranches();
+  } catch (e) { showError("Couldn't delete the tag", e); }
+}
+
+// Combine, reword or drop commits that haven't been sent yet.
+async function tidyCommits(repo) {
+  const st = state.status[repo] || {};
+  if (st.op) { toast('Finish or abort what is in progress first (see the yellow banner).', 'warn'); return; }
+  const u = await gitRaw('unsentCommits', repo).catch((e) => ({ error: e.message }));
+  if (u.error) { showError("Couldn't read your commits", new Error(u.error)); return; }
+  if (!u.commits.length) { toast('Nothing to tidy — every commit on this branch has been sent.', 'info'); return; }
+  if (u.hasMerge) { toast("Your unsent commits include a merge, which can't be tidied here.", 'warn'); return; }
+  const n = u.commits.length;
+  const r = await modal({
+    title: `Tidy ${plural(n, 'unsent commit')} on ${st.branch}`,
+    wide: true,
+    body: `<p class="hint">Oldest first. Only commits that haven't been sent are listed, so nobody else has them yet.${u.more ? ' (Showing the newest 50.)' : ''}</p>
+      <div class="tidy-list">${u.commits.map((c, i) => `<div class="tidy-commit" data-i="${i}">
+        <div class="tidy-head"><span class="mono">${c.short}</span>
+          <select name="act${i}" aria-label="What to do with ${esc(c.short)}">
+            <option value="pick">Keep</option>
+            ${i ? '<option value="squash">Combine into the one above</option>' : ''}
+            <option value="drop">Drop (throw away)</option>
+          </select></div>
+        <textarea name="msg${i}" rows="${Math.min(4, c.message.split('\n').length)}" aria-label="Message for ${esc(c.short)}" spellcheck="true">${esc(c.message)}</textarea>
+        <div class="tidy-note hint" hidden></div>
+      </div>`).join('')}</div>`,
+    buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'ok', label: 'Tidy commits', kind: 'primary' }],
+    init: (el) => {
+      // A combined commit's message goes into the commit it joins; dropped ones have none.
+      const sync = () => {
+        el.querySelectorAll('.tidy-commit').forEach((row) => {
+          const act = row.querySelector('select').value;
+          const note = row.querySelector('.tidy-note');
+          row.querySelector('textarea').hidden = act !== 'pick';
+          row.classList.toggle('dropped', act === 'drop');
+          note.hidden = act === 'pick';
+          note.textContent = act === 'drop' ? 'This commit and its changes will be removed.' : 'Its changes join the commit above; edit the message there.';
+        });
+      };
+      el.addEventListener('change', sync);
+      sync();
+    },
+  });
+  if (r.id !== 'ok') return;
+  const steps = u.commits.map((c, i) => {
+    const action = r.values[`act${i}`];
+    const msg = r.values[`msg${i}`].trim();
+    return { hash: c.hash, action, ...(action === 'pick' && msg !== c.message ? { message: msg } : {}) };
+  });
+  if (steps.every((s) => s.action === 'pick' && s.message == null)) { toast('Nothing changed.', 'info'); return; }
+  if (steps.some((s) => s.action === 'pick' && s.message === '')) { toast('A kept commit needs a message.', 'warn'); return; }
+  if (steps.every((s) => s.action === 'drop') && !(await confirmBox('Drop every unsent commit?', '<p>All your unsent commits and their changes will be removed from this branch. Undo can bring them back.</p>', 'Drop them all', true))) return;
+  try {
+    const before = await gitRaw('headOid', repo).catch(() => null);
+    const res = await busy(repo, 'Tidying commits…', () => git('tidyCommits', repo, steps));
+    if (await afterMaybeConflict(repo, res, null)) offerUndoMove(repo, before, 'Commits tidied.', `tidy of ${plural(n, 'commit')}`);
+    if (state.tab === 'history') loadHistory();
+  } catch (e) { showError("Couldn't tidy the commits", e); }
 }
 
 // Back out an older (or already sent) commit by adding one that does the opposite.
@@ -1982,15 +2357,17 @@ async function loadStashPreview() {
     <div class="diff-scroll">${renderDiff(diff)}</div>`;
 }
 
-async function shelve(repo) {
-  const name = await ask('Put changes on the Shelf', {
+// paths: only these files (whole files); all changes when omitted.
+async function shelve(repo, paths = null) {
+  const name = await ask(paths ? `Put ${plural(paths.length, 'file')} on the Shelf` : 'Put changes on the Shelf', {
     label: 'Name (optional) — so you remember what this was',
     placeholder: 'e.g. half-done refactor of login',
-    help: 'All your uncommitted changes (including new files) will be set aside and your folder will match your last commit.',
+    help: paths ? 'The changes to the ticked files are set aside and those files go back to your last commit. Your other changes stay where they are.'
+      : 'All your uncommitted changes (including new files) will be set aside and your folder will match your last commit.',
     okLabel: 'Put on Shelf',
   });
   if (name === null) return;
-  try { await busy(repo, 'Shelving…', () => git('stashSave', repo, name)); toast('Changes are on the Shelf.', 'ok'); if (state.tab === 'shelf') loadShelf(); }
+  try { await busy(repo, 'Shelving…', () => git('stashSave', repo, name, paths)); toast('Changes are on the Shelf.', 'ok'); if (state.tab === 'shelf') loadShelf(); }
   catch (e) { showError("Couldn't shelve", e); }
 }
 
@@ -2622,6 +2999,11 @@ async function openSettings() {
       <h3>Commits</h3>
       <label class="field"><span>Start every commit summary with (optional)</span><input name="commitTemplate" value="${esc(s.commitTemplate || '')}" placeholder="e.g. ABC-123: "></label>
       <label class="field"><span>Quick type buttons above the summary (space-separated; empty to hide)</span><input name="commitPrefixes" value="${esc(s.commitPrefixes ?? 'feat fix docs refactor test chore')}"></label>
+      <label class="check"><input type="checkbox" name="workItems" ${s.workItems !== false ? 'checked' : ''}> Show a work item box (AB#) for Azure Boards, filled in from the branch name (e.g. feature/1234-login)</label>
+      <h3>Azure DevOps</h3>
+      <p class="hint">With a personal access token, repos on Azure DevOps show their pull request's reviews and build next to the branch. Create one in Azure DevOps under <b>User settings → Personal access tokens</b> with the <b>Code (Read)</b> permission. It's stored encrypted on this computer and only sent to Azure DevOps.</p>
+      <label class="field"><span>Personal access token</span><input name="adoToken" type="password" autocomplete="off" placeholder="${state.adoToken ? 'Saved — type a new one to replace it' : 'Paste your token'}"></label>
+      ${state.adoToken ? '<label class="check"><input type="checkbox" name="adoForget"> Forget the saved token</label>' : ''}
       <h3>Seeing what happens</h3>
       <label class="check"><input type="checkbox" name="preview" ${s.previewCommands ? 'checked' : ''}> Show me the git commands before running any action</label>
       <p class="hint">You can always hold <b>Shift</b> while clicking a button to preview just that one action.</p>
@@ -2642,6 +3024,15 @@ async function openSettings() {
   s.theme = v.theme;
   s.commitTemplate = v.commitTemplate;
   s.commitPrefixes = v.commitPrefixes.trim();
+  s.workItems = v.workItems;
+  if (v.adoToken.trim() || v.adoForget) {
+    const t = await api.ado.setToken(v.adoForget ? '' : v.adoToken.trim());
+    if (!t.ok) showError("Couldn't save the Azure DevOps token", new Error(t.error));
+    state.adoToken = await api.ado.hasToken();
+    state.prStatus = {};
+    for (const k of Object.keys(prLoaded)) delete prLoaded[k];
+    loadPrStatus(currentRepo(), true);
+  }
   s.claudePath = v.claudePath.trim();
   s.claudeModel = v.claudeModel.trim();
   s.previewCommands = v.preview;
@@ -2724,6 +3115,7 @@ function openMenu(anchor, repo) {
     ${st.hasRemote ? item('open-web', 'Open the repo website') : ''}
     ${st.upstream && st.branch ? item('open-pr', `Open a pull request for ${esc(st.branch)}`) : ''}
     ${st.branch ? item('update-from', `Update ${esc(st.branch)} from another branch…`) : ''}
+    ${st.branch ? item('finish-branch', `Finish ${esc(st.branch)} (after its pull request)…`) : ''}
     ${item('compare', 'Compare branches')}
   </div>`, { width: 260, onOpen: (el) => el.querySelector('button')?.focus() });
 }
@@ -2782,6 +3174,7 @@ function paletteCommands() {
     a('Check for updates', 'fetch');
     a('New branch…', 'new-branch');
     if (st.branch) a(`Update ${st.branch} from another branch…`, 'update-from');
+    if (st.branch) a(`Finish ${st.branch} (after its pull request)…`, 'finish-branch');
     a('Compare branches', 'compare');
     a('Put changes on the Shelf…', 'shelve');
     a('Tidy up branches…', 'tidy');
@@ -3294,9 +3687,29 @@ const actions = {
     else if (state.tab === 'compare') loadCompareDiff();
     else if (state.tab === 'shelf') loadStashPreview();
   },
-  'file-history': (t, e) => { e?.stopPropagation(); showFileHistory(t.dataset.path); },
+  'file-history': (t, e) => { e?.stopPropagation(); state.blame = false; showFileHistory(t.dataset.path); },
+  'file-blame': (t, e) => { e?.stopPropagation(); state.blame = true; showFileHistory(t.dataset.path); },
+  'blame-mode': (t) => { state.blame = !!t.dataset.on; renderHistoryTab(); },
+  'blame-commit': (t) => { state.blame = false; state.selCommit = t.dataset.hash; renderHistoryTab(); },
+  'blame-explain': (t) => askClaude(`In ${state.histFile}, lines ${t.dataset.from}–${t.dataset.to} were last changed by commit ${t.dataset.hash.slice(0, 10)}. Explain in plain English what that commit did to those lines and why it was probably done. Look at it with git show.`),
   'update-from': (t) => { closePopover(); updateFrom(t.dataset.repo || currentRepo()); },
   'ws-update-from': () => wsUpdateFrom(),
+  'finish-branch': (t) => { closePopover(); finishBranch(t.dataset.repo || currentRepo()); },
+  'ws-finish': () => wsFinish(),
+  'discard-hunk': (t) => discardBlock(t.dataset.h),
+  'tidy-commits': () => tidyCommits(currentRepo()),
+  'open-pr-web': (t) => api.openUrl(t.dataset.url),
+  'ws-search-clear': () => { state.wsQuery = ''; $('#ws-search').value = ''; $('#ws-results').innerHTML = ''; },
+  'ws-hit-commit': (t) => openCommitIn(t.dataset.repo, t.dataset.hash, t.dataset.on),
+  'ws-hit-branch': (t) => { state.branchFilter = t.dataset.name; openRepo(t.dataset.repo, state.view.ws, 'branches'); },
+  'add-tag': (t) => addTag(currentRepo(), t.dataset.hash),
+  'delete-tag': (t) => deleteTag(currentRepo(), t.dataset.name),
+  'push-tag': async (t) => { const repo = currentRepo(); try { await busy(repo, 'Sending tag…', () => git('pushTag', repo, t.dataset.name)); toast(`Sent ${t.dataset.name} to the server.`, 'ok'); } catch (e) { showError("Couldn't send the tag", e); } },
+  'shelve-ticked': () => {
+    const repo = currentRepo();
+    const ticked = changedFiles(state.status[repo]).filter((f) => state.checked[repo]?.[f.path]);
+    shelve(repo, ticked.flatMap((f) => (f.orig ? [f.path, f.orig] : [f.path])));
+  },
   'undo-list': (t) => (popoverEl ? closePopover() : openUndoList(t)),
   'undo-run': (t) => runUndo(t.dataset.id),
   compare: (t) => { closePopover(); const repo = t.dataset.repo || currentRepo(); if (!samePath(repo, currentRepo())) openRepo(repo, state.view.ws, 'compare'); else setTab('compare'); },
@@ -3304,7 +3717,7 @@ const actions = {
   'cmp-swap': () => { const c = state.cmp; if (c) showCompare(c.head, c.base); },
   'cmp-range': (t) => { const c = state.cmp; if (!c || c.mode === t.dataset.mode) return; c.mode = t.dataset.mode; c.data = null; renderCompareTab(); loadCompare(); },
   'cmp-file': (t) => { state.cmp.sel = t.dataset.path; document.querySelectorAll('#tab-body .file').forEach((f) => f.classList.toggle('selected', f === t)); loadCompareDiff(); },
-  'clear-file-history': () => { state.histFile = null; state.history = null; renderHistoryTab(); loadHistory(); },
+  'clear-file-history': () => { state.histFile = null; state.blame = false; state.history = null; renderHistoryTab(); loadHistory(); },
   'open-menu': (t) => (popoverEl ? closePopover() : openMenu(t, t.dataset.repo)),
   'branch-switcher': (t) => (popoverEl ? closePopover() : openBranchSwitcher(t, t.dataset.repo)),
   'switcher-pick': (t) => {
@@ -3536,6 +3949,9 @@ document.addEventListener('input', (e) => {
   if (e.target.id === 'commit-summary' || e.target.id === 'commit-body') {
     state.commitMsg[repo] = { summary: $('#commit-summary').value, body: $('#commit-body').value };
     updateCommitButtons();
+  } else if (e.target.id === 'work-item') {
+    e.target.value = e.target.value.replace(/[^\d]/g, '');
+    state.workItem[e.target.dataset.key] = e.target.value;
   } else if (e.target.classList.contains('custom') && state.conflict) {
     state.conflict.custom[e.target.dataset.i] = e.target.value;
     if (!state.conflict.resultDirty) state.conflict.resultText = null;
@@ -3600,6 +4016,7 @@ function updateWatchers() {
 
 async function init() {
   state.config = await api.getConfig();
+  state.adoToken = await api.ado.hasToken().catch(() => false);
   api.onLog(addLog);
   api.claude.onEvent(onClaudeEvent);
   api.onProgress((p) => {
@@ -3639,7 +4056,9 @@ async function init() {
     const gap = document.hasFocus() ? 20000 : 60000;
     if (Date.now() - lastPoll >= gap) { lastPoll = Date.now(); refreshAll(); }
   }, 2000);
-  window.addEventListener('focus', () => { lastPoll = Date.now(); refreshAll(); });
+  window.addEventListener('focus', () => { lastPoll = Date.now(); refreshAll(); loadPrStatus(currentRepo()); });
+  // Pull request status changes on the server (reviews, builds); loadPrStatus limits itself to every 5 minutes.
+  setInterval(() => { if (document.hasFocus()) loadPrStatus(currentRepo()); }, 60000);
   setTimeout(backgroundFetch, 5000);
   setInterval(backgroundFetch, 60000);
   const id = await git('getIdentity').catch(() => null);

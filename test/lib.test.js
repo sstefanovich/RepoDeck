@@ -34,6 +34,20 @@ test('a patch of only some lines keeps the rest as context and fixes line number
   assert.deepEqual(lib.changedLines(`${head}@@ -1,0 +1,2 @@\n+}\n+}\n`).map((r) => r.key), ['+}#0', '+}#1']);
 });
 
+test('work items: read from branch names and added to messages once', () => {
+  assert.equal(lib.workItemFromBranch('feature/1234-login'), '1234');
+  assert.equal(lib.workItemFromBranch('bug/98765'), '98765');
+  assert.equal(lib.workItemFromBranch('users/steve/4321_fix-crash'), '4321');
+  assert.equal(lib.workItemFromBranch('feature/login-v2'), null, 'v2 is not a work item');
+  assert.equal(lib.workItemFromBranch('release/2024'), null);
+  assert.equal(lib.workItemFromBranch('main'), null);
+  assert.equal(lib.withWorkItem('Fix login', '1234'), 'Fix login\n\nAB#1234');
+  assert.equal(lib.withWorkItem('Fix login\n\nDetails here.', 'AB#1234'), 'Fix login\n\nDetails here.\nAB#1234');
+  assert.equal(lib.withWorkItem('Fix login AB#1234', '1234'), 'Fix login AB#1234', 'not added twice');
+  assert.equal(lib.withWorkItem('Fix login', ''), 'Fix login');
+  assert.equal(lib.withWorkItem('Fix login', 'abc'), 'Fix login', 'only numbers');
+});
+
 test('conflict parsing round-trips and applies choices', () => {
   const text = 'top\n<<<<<<< HEAD\nmine\n||||||| base\norig\n=======\ntheirs\n>>>>>>> feature\nbottom\n';
   const p = lib.parseConflicts(text);

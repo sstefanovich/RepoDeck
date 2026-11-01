@@ -384,6 +384,23 @@ function partialPatch(diffText, excluded) {
   return any ? out.join('\n') + '\n' : null;
 }
 
+// ---------- Azure Boards work items ----------
+// The work item number in a branch name, as in feature/1234-login, bug/1234 or users/me/1234_fix.
+// Version-like branches (release/2.4, release/2024) are not work items.
+function workItemFromBranch(branch) {
+  if (!branch || /^(release|hotfix|support)\//i.test(branch)) return null;
+  const m = branch.match(/(?:^|[/_-])(\d{2,7})(?=[/_-]|$)/);
+  return m ? m[1] : null;
+}
+
+// Adds "AB#1234" (which Azure DevOps turns into a link to the work item) to a commit message,
+// unless it already mentions it.
+function withWorkItem(message, id) {
+  const n = String(id || '').replace(/^AB#/i, '').trim();
+  if (!/^\d+$/.test(n) || new RegExp(`AB#${n}\\b`, 'i').test(message)) return message;
+  return `${message}${message.includes('\n') ? '\n' : '\n\n'}AB#${n}`;
+}
+
 // ---------- commit graph ----------
 // For each commit (newest first), which lane it sits in and how lanes connect to the rows around it.
 function graphRows(commits) {
@@ -434,5 +451,5 @@ function fuzzyScore(query, text) {
 
 if (typeof module !== 'undefined') {
   module.exports = { esc, basename, norm, samePath, plural, timeAgo, parseConflicts, pickLines, myers, diffLines, sideBySide, inlineDiff, toLines, md,
-    langOf, tokenize, highlight, changeRange, parseUnified, pairHunk, lineKeyer, changedLines, partialPatch, graphRows, fuzzyScore };
+    langOf, tokenize, highlight, changeRange, parseUnified, pairHunk, lineKeyer, changedLines, partialPatch, workItemFromBranch, withWorkItem, graphRows, fuzzyScore };
 }

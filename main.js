@@ -1,10 +1,11 @@
-const { app, BrowserWindow, Menu, ipcMain, dialog, shell, nativeTheme } = require('electron');
+const { app, BrowserWindow, Menu, ipcMain, dialog, shell, nativeTheme, safeStorage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { spawn } = require('child_process');
 const git = require('./src/git');
 const { ClaudeSession, findClaude, oneShot } = require('./src/claude');
+const ado = require('./src/ado');
 
 let win;
 
@@ -154,6 +155,30 @@ ipcMain.handle('git', async (_e, op, ...args) => {
   if (!fn) return { ok: false, error: `Unknown operation: ${op}` };
   try { return { ok: true, data: await fn(...args) }; }
   catch (err) { return { ok: false, error: err.message, code: err.code }; }
+});
+
+// ---------- Azure DevOps (pull request status) ----------
+// The personal access token is encrypted with Windows' own data protection (safeStorage) and
+// kept in its own file; it is only ever used here, never sent to the page.
+const secretsFile = () => path.join(app.getPath('userData'), 'secrets.json');
+function readAdoToken() {
+  try {
+    const s = JSON.parse(fs.readFileSync(secretsFile(), 'utf8'));
+    return s.adoToken && safeStorage.isEncryptionAvailable() ? safeStorage.decryptString(Buffer.from(s.adoToken, 'base64')) : '';
+  } catch { return ''; }
+}
+ipcMain.handle('ado:hasToken', () => !!readAdoToken());
+ipcMain.handle('ado:setToken', (_e, token) => {
+  const t = String(token || '').trim();
+  if (t && !safeStorage.isEncryptionAvailable()) return { ok: false, error: "Windows can't encrypt the token on this computer, so it wasn't saved." };
+  fs.writeFileSync(secretsFile(), JSON.stringify(t ? { adoToken: safeStorage.encryptString(t).toString('base64') } : {}));
+  return { ok: true };
+});
+ipcMain.handle('ado:prStatus', async (_e, repo, branch) => {
+  try {
+    const remoteUrl = await git.ops.remoteUrl(repo);
+    return { ok: true, data: await ado.prStatus({ remoteUrl, branch, token: readAdoToken() }) };
+  } catch (err) { return { ok: false, error: err.message, code: err.code }; }
 });
 
 // ---------- Claude chat panel (Claude Code CLI) ----------
