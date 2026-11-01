@@ -360,6 +360,8 @@ input.filter { width: 260px; }
 .st-add { color: var(--ok); }
 .st-del { color: var(--bad); }
 .uf-info { min-height: 20px; margin: 0 0 12px; }
+.steps { margin: 0 0 12px; padding-left: 22px; }
+.steps li { margin: 4px 0; }
 .wu-rows { display: flex; flex-direction: column; gap: 2px; max-height: 260px; overflow-y: auto; }
 .wu-row { padding: 4px 0; }
 .wu-info { margin-left: auto; padding-left: 12px; font-size: 12.5px; color: var(--muted); text-align: right; }

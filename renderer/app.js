@@ -12,7 +12,7 @@ const MUTATING = new Set([
   'commit', 'discard', 'ignore', 'fetch', 'pull', 'push', 'addRemote', 'createBranch', 'switchBranch', 'checkoutRemote',
   'renameBranch', 'deleteBranch', 'merge', 'undoLastCommit', 'stashSave', 'stashApply', 'stashPop', 'stashDrop',
   'resolveSide', 'saveResolution', 'markResolved', 'abortOp', 'continueOp', 'skipOp', 'cherryPick', 'cherryPickOnto',
-  'clone', 'init', 'setIdentity', 'resetTo', 'restoreBranch', 'stashStore', 'updateFrom', 'revertCommit',
+  'clone', 'init', 'setIdentity', 'resetTo', 'restoreBranch', 'stashStore', 'updateFrom', 'revertCommit', 'finishBranch',
 ]);
 let previewSuppressed = 0;
 const CANCELLED = 'CANCELLED';
@@ -109,6 +109,7 @@ const state = {
   previewOpen: false, // a command preview is showing (so nothing is running yet)
   progress: {},       // repo (or 'clone') -> { text, percent } for long operations
   undos: [],          // recent actions that can be undone, newest first (see recordUndo)
+  prStatus: {},       // norm(repo) -> pull request info from Azure DevOps, for the current branch
   histFile: null,     // History: only commits touching this file
   histQuery: '',      // History: search text
 };
@@ -616,11 +617,16 @@ function renderAlignment() {
   const el = $('#ws-align');
   const w = currentWs();
   if (!el || !w) return;
+  const gone = w.repos.filter((p) => state.status[p]?.upstreamGone && state.status[p]?.branch);
+  const finish = gone.length ? `<div class="banner info ws-banner"><div><div class="banner-title">${plural(gone.length, 'branch was', 'branches were')} deleted on the server</div>
+    <div>${gone.map((p) => `<b>${esc(basename(p))}</b> → ${esc(state.status[p].branch)}`).join(' · ')}</div>
+    <div class="hint">That usually means their pull requests were completed.</div></div>
+    <div class="banner-actions"><button class="btn primary" data-action="ws-finish">✓ Finish them…</button></div></div>` : '';
   const on = w.repos.map((p) => ({ p, b: state.status[p]?.branch })).filter((x) => x.b);
   const names = [...new Set(on.map((x) => x.b))];
-  if (on.length < 2 || names.length < 2) { el.innerHTML = ''; return; }
+  if (on.length < 2 || names.length < 2) { el.innerHTML = finish; return; }
   const counts = names.map((n) => [n, on.filter((x) => x.b === n).length]).sort((a, b) => b[1] - a[1]);
-  el.innerHTML = `<div class="banner info ws-banner"><div><div class="banner-title">These repos are on different branches</div>
+  el.innerHTML = finish + `<div class="banner info ws-banner"><div><div class="banner-title">These repos are on different branches</div>
     <div>${on.map((x) => `<b>${esc(basename(x.p))}</b> → ${esc(x.b)}`).join(' · ')}</div>
     <div class="hint">That's fine if it's on purpose — but if you're working on one feature across repos, they usually belong on the same branch.</div></div>
     <div class="banner-actions"><button class="btn primary" data-action="ws-switch" data-preset="${esc(counts[0][0])}">Line them up…</button></div></div>`;
@@ -783,6 +789,13 @@ function bannerHtml(repo) {
     return `<div class="banner info"><div><div class="banner-title">You're not on a branch ("detached HEAD")</div>
       <div>You're looking at an old snapshot. Any commits you make here won't belong to a branch and are easy to lose.</div></div>
       <div class="banner-actions"><button class="btn" data-action="tab" data-tab="branches">Go back to a branch</button><button class="btn primary" data-action="new-branch" data-repo="${r}">Create a branch here</button></div></div>`;
+  }
+  const pr = state.prStatus[norm(repo)];
+  const prDone = pr?.branch === st.branch && pr.status === 'completed';
+  if (st.branch && (st.upstreamGone || prDone)) {
+    return `<div class="banner info"><div><div class="banner-title">${prDone ? `Pull request #${pr.id} for ${esc(st.branch)} is completed` : `${esc(st.branch)} was deleted on the server`}</div>
+      <div>${prDone ? 'Its work is in the main branch now.' : 'That usually means its pull request was completed.'} Finish up: switch to the main branch, get its latest, and delete ${esc(st.branch)} here.</div></div>
+      <div class="banner-actions"><button class="btn primary" data-action="finish-branch" data-repo="${r}" title="git switch, git pull, git branch -D">✓ Finish branch…</button></div></div>`;
   }
   return '';
 }
@@ -1488,16 +1501,90 @@ async function updateFrom(repo) {
   } catch (e) { showError(`Couldn't update from ${ref}`, e); }
 }
 
+// When a branch's work is merged: go to the main branch, get its latest, delete the branch.
+async function finishBranch(repo) {
+  const st = state.status[repo] || {};
+  if (st.op) { toast('Finish or abort what is in progress first (see the yellow banner).', 'warn'); return; }
+  if (!st.branch) { toast("You're not on a branch.", 'warn'); return; }
+  const target = await gitRaw('defaultBranch', repo).catch(() => null);
+  if (!target || target === st.branch) { toast(`${st.branch} is the main branch, so there's nothing to finish.`, 'info'); return; }
+  const dirty = changedFiles(st).length;
+  const onServer = st.upstream && !st.upstreamGone;
+  const r = await modal({
+    title: `Finish ${st.branch}?`,
+    body: `<ol class="steps">
+        <li>Switch to <b>${esc(target)}</b> and get its latest${st.hasRemote ? ' from the server' : ''}.</li>
+        <li>Delete <b>${esc(st.branch)}</b> on your computer. (Undo can bring it back.)</li>
+      </ol>
+      ${onServer ? `<label class="check"><input type="checkbox" name="remote"> Also delete it on the server (${esc(st.upstream)})</label>` : ''}
+      ${dirty ? `<p class="hint">You have ${plural(dirty, 'uncommitted change')} on this branch. They'll be put on the Shelf first, so nothing is lost.</p>` : ''}`,
+    buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'ok', label: '✓ Finish branch', kind: 'primary' }],
+  });
+  if (r.id !== 'ok') return;
+  const opts = { deleteRemote: !!r.values.remote };
+  try {
+    if (dirty) await git('stashSave', repo, `[auto] ${st.branch}: set aside when finishing the branch`);
+    let res = await busy(repo, `Finishing ${st.branch}…`, () => git('finishBranch', repo, opts));
+    if (res.needsForce) {
+      const go = await confirmBox(`${st.branch} isn't in ${res.target} as-is`, `<p>Its commits aren't in <b>${esc(res.target)}</b> exactly as they are here. That's normal when a pull request is <b>squashed</b> on merge${st.upstreamGone ? ', and the server has already deleted the branch, so it was most likely merged' : ''}.</p>
+        <p>Delete it anyway? Undo can bring it back afterwards.</p>`, 'Delete it anyway', true);
+      if (!go) return;
+      res = await busy(repo, `Finishing ${st.branch}…`, () => git('finishBranch', repo, { ...opts, force: true }));
+    }
+    undoToast(`Finished ${res.branch}. You're on ${res.target}${res.pulled === false ? " (couldn't get its latest — try Get latest)" : ''}.`, repo, `finish of ${res.branch}`, async () => {
+      await git('restoreBranch', repo, res.branch, res.oid);
+      await git('switchBranch', repo, res.branch);
+    });
+    if (samePath(repo, currentRepo()) && state.tab === 'branches') loadBranches();
+  } catch (e) { showError(`Couldn't finish ${st.branch}`, e); }
+}
+
+// Workspace: finish every repo whose branch was deleted on the server.
+async function wsFinish() {
+  const repos = currentWs().repos.filter((p) => state.status[p]?.upstreamGone && state.status[p]?.branch);
+  if (!repos.length) return;
+  const r = await modal({
+    title: 'Finish merged branches',
+    body: `<p>These branches were deleted on the server, which usually means their pull requests were completed. For each one: switch to the main branch, get its latest, and delete the branch here.</p>
+      <div class="field">${repos.map((p) => `<label class="check"><input type="checkbox" name="repos" data-multi="1" value="${esc(p)}" checked> <b>${esc(basename(p))}</b> <span class="muted small">${esc(state.status[p].branch)}</span></label>`).join('')}</div>
+      <p class="hint">Repos with uncommitted changes, or whose commits aren't in the main branch as-is (e.g. squashed), are skipped — open them to finish.</p>`,
+    buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'ok', label: '✓ Finish', kind: 'primary' }],
+  });
+  if (r.id !== 'ok' || !r.values.repos?.length) return;
+  const done = [];
+  const results = await forEachRepo('Finishing…', r.values.repos, async (repo) => {
+    if (changedFiles(state.status[repo]).length) return { ok: false, warn: true, msg: 'skipped — has uncommitted changes; open this repo to finish it' };
+    const res = await git('finishBranch', repo, {});
+    if (res.needsForce) return { ok: false, warn: true, msg: `${res.branch}'s commits aren't in ${res.target} as-is (squashed?) — open this repo to finish it` };
+    done.push({ repo, ...res });
+    return { ok: true, msg: `finished ${res.branch}, now on ${res.target}` };
+  }, (repo) => ['finishBranch', repo, {}]);
+  if (!results) return;
+  if (done.length) {
+    recordUndo({
+      label: `finish of ${plural(done.length, 'branch', 'branches')}`,
+      repos: done.map((d) => d.repo),
+      run: async () => {
+        for (const d of done) { await git('restoreBranch', d.repo, d.branch, d.oid); await git('switchBranch', d.repo, d.branch); }
+        await refreshAll();
+      },
+    });
+  }
+  resultsModal('Finish branches — results', results, done.length ? 'Changed your mind? <b>↶ Undo…</b> brings the branches back.' : '');
+}
+
 async function branchMenu(repo, name) {
   const b = state.branches?.local.find((x) => x.name === name);
   if (!b) return;
   const cur = state.status[repo]?.branch;
   const c = await choose(name, '', [
     ...(b.current || !cur ? [] : [{ id: 'compare', label: `Compare with ${cur}`, desc: `See what ${esc(name)} has that ${esc(cur)} doesn't.` }]),
+    ...(b.current ? [{ id: 'finish', label: 'Finish this branch…', desc: 'After its pull request: switch to the main branch, get its latest, and delete this branch.' }] : []),
     { id: 'rename', label: 'Rename…' },
     ...(b.current ? [] : [{ id: 'delete', label: 'Delete…', desc: 'Removes the branch from your computer (and optionally the server).', kind: 'danger' }]),
   ]);
   if (c === 'compare') showCompare(cur, name);
+  else if (c === 'finish') finishBranch(repo);
   else if (c === 'rename') {
     const nn = await ask(`Rename ${name}`, { label: 'New name', value: name, transform: branchTransform, okLabel: 'Rename', help: b.upstream ? "Note: this only renames it on your computer. The server still has the old name." : '' });
     if (!nn || nn === name) return;
@@ -2724,6 +2811,7 @@ function openMenu(anchor, repo) {
     ${st.hasRemote ? item('open-web', 'Open the repo website') : ''}
     ${st.upstream && st.branch ? item('open-pr', `Open a pull request for ${esc(st.branch)}`) : ''}
     ${st.branch ? item('update-from', `Update ${esc(st.branch)} from another branch…`) : ''}
+    ${st.branch ? item('finish-branch', `Finish ${esc(st.branch)} (after its pull request)…`) : ''}
     ${item('compare', 'Compare branches')}
   </div>`, { width: 260, onOpen: (el) => el.querySelector('button')?.focus() });
 }
@@ -2782,6 +2870,7 @@ function paletteCommands() {
     a('Check for updates', 'fetch');
     a('New branch…', 'new-branch');
     if (st.branch) a(`Update ${st.branch} from another branch…`, 'update-from');
+    if (st.branch) a(`Finish ${st.branch} (after its pull request)…`, 'finish-branch');
     a('Compare branches', 'compare');
     a('Put changes on the Shelf…', 'shelve');
     a('Tidy up branches…', 'tidy');
@@ -3297,6 +3386,8 @@ const actions = {
   'file-history': (t, e) => { e?.stopPropagation(); showFileHistory(t.dataset.path); },
   'update-from': (t) => { closePopover(); updateFrom(t.dataset.repo || currentRepo()); },
   'ws-update-from': () => wsUpdateFrom(),
+  'finish-branch': (t) => { closePopover(); finishBranch(t.dataset.repo || currentRepo()); },
+  'ws-finish': () => wsFinish(),
   'undo-list': (t) => (popoverEl ? closePopover() : openUndoList(t)),
   'undo-run': (t) => runUndo(t.dataset.id),
   compare: (t) => { closePopover(); const repo = t.dataset.repo || currentRepo(); if (!samePath(repo, currentRepo())) openRepo(repo, state.view.ws, 'compare'); else setTab('compare'); },

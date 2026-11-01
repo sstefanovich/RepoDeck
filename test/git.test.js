@@ -350,6 +350,59 @@ test('revert with uncommitted edits in the same file sets them aside and puts th
   await ops.abortOp(a, 'revert');
 });
 
+test('finish a branch after its pull request: merged, and squashed', async () => {
+  const srv = sb.server('finish');
+  const a = sb.repo('finish');
+  sb.write(a, 'a.txt', 'a\n');
+  await ops.commit(a, { message: 'base', paths: [], all: true });
+  await ops.addRemote(a, srv);
+  await ops.push(a);
+  sb.sh(a, 'remote', 'set-head', 'origin', 'main');
+  // The "server side" of a pull request, done from a second clone.
+  const reviewer = sb.clone(srv, 'finish-reviewer');
+  const complete = (branch, squash) => {
+    sb.sh(reviewer, 'fetch', '-q');
+    sb.sh(reviewer, 'switch', '-q', 'main');
+    sb.sh(reviewer, 'pull', '-q');
+    if (squash) { sb.sh(reviewer, 'merge', '-q', '--squash', `origin/${branch}`); sb.sh(reviewer, 'commit', '-qm', `Squashed ${branch}`); }
+    else sb.sh(reviewer, 'merge', '-q', '--no-ff', '-m', `Merge ${branch}`, `origin/${branch}`);
+    sb.sh(reviewer, 'push', '-q', 'origin', 'main');
+    sb.sh(reviewer, 'push', '-q', 'origin', '--delete', branch);
+  };
+
+  await ops.createBranch(a, 'feature/one', null);
+  sb.write(a, 'one.txt', '1\n');
+  await ops.commit(a, { message: 'one', paths: [], all: true });
+  await ops.push(a);
+  complete('feature/one', false);
+  await ops.fetch(a);
+  assert.ok((await ops.status(a)).upstreamGone, 'the branch is gone on the server');
+  const r = await ops.finishBranch(a);
+  assert.ok(r.ok && r.pulled);
+  const st = await ops.status(a);
+  assert.equal(st.branch, 'main');
+  assert.ok(fs.existsSync(path.join(a, 'one.txt')), 'main has the merged work');
+  assert.ok(!(await ops.branches(a)).local.some((b) => b.name === 'feature/one'), 'the branch is deleted');
+  await ops.restoreBranch(a, 'feature/one', r.oid);
+  assert.ok((await ops.branches(a)).local.some((b) => b.name === 'feature/one'), 'undo brings it back');
+
+  await ops.createBranch(a, 'feature/two', null);
+  sb.write(a, 'two.txt', '2\n');
+  await ops.commit(a, { message: 'two', paths: [], all: true });
+  await ops.push(a);
+  complete('feature/two', true);
+  const s = await ops.finishBranch(a);
+  assert.ok(s.needsForce, 'a squashed branch is not deleted without asking');
+  assert.equal((await ops.status(a)).branch, 'feature/two', 'nothing changed');
+  assert.ok((await ops.finishBranch(a, { force: true })).ok);
+  assert.equal((await ops.status(a)).branch, 'main');
+  assert.ok(fs.existsSync(path.join(a, 'two.txt')));
+
+  sb.write(a, 'dirty.txt', 'x\n');
+  await ops.switchBranch(a, 'feature/one');
+  await assert.rejects(ops.finishBranch(a), /uncommitted changes/);
+});
+
 test('compare two branches', async () => {
   const a = sb.repo('compare');
   sb.write(a, 'keep.txt', 'k\n');

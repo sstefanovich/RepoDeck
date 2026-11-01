@@ -185,15 +185,16 @@ const ops = {
     if (!fs.existsSync(repo)) return { missing: true };
     const r = await run(repo, ['status', '--porcelain=v2', '--branch', '-z', '--untracked-files=all'], { quiet: true });
     if (!r.ok) return { error: (r.stderr || 'Not a git repository').trim() };
-    const s = { branch: null, detached: false, oid: null, initial: false, upstream: null, ahead: 0, behind: 0, staged: [], unstaged: [], untracked: [], conflicted: [] };
+    const s = { branch: null, detached: false, oid: null, initial: false, upstream: null, upstreamGone: false, ahead: 0, behind: 0, staged: [], unstaged: [], untracked: [], conflicted: [] };
     const parts = r.stdout.split('\0');
     for (let i = 0; i < parts.length; i++) {
       const line = parts[i];
       if (!line) continue;
       if (line.startsWith('# branch.oid ')) { s.oid = line.slice(13); s.initial = s.oid === '(initial)'; }
       else if (line.startsWith('# branch.head ')) { const h = line.slice(14); if (h === '(detached)') s.detached = true; else s.branch = h; }
-      else if (line.startsWith('# branch.upstream ')) s.upstream = line.slice(18);
-      else if (line.startsWith('# branch.ab ')) { const m = line.match(/\+(\d+) -(\d+)/); if (m) { s.ahead = +m[1]; s.behind = +m[2]; } }
+      // git prints no ahead/behind line when the upstream branch is gone from the server.
+      else if (line.startsWith('# branch.upstream ')) { s.upstream = line.slice(18); s.upstreamGone = true; }
+      else if (line.startsWith('# branch.ab ')) { s.upstreamGone = false; const m = line.match(/\+(\d+) -(\d+)/); if (m) { s.ahead = +m[1]; s.behind = +m[2]; } }
       else if (line[0] === '1' || line[0] === '2') {
         const f = line.split(' ');
         const xy = f[1];
@@ -449,6 +450,34 @@ const ops = {
     const notSent = await run(repo, ['rev-list', '--count', 'HEAD', `^${ref}`, '^@{u}'], { quiet: true });
     const sent = notSent.ok ? ahead - Number(notSent.stdout.trim()) : 0;
     return { ahead, behind, sent, canRebase: sent === 0 };
+  },
+
+  // After a branch's pull request is merged: switch to the default branch, get its latest, and
+  // delete the branch (here, and on the server if it's still there and `deleteRemote`).
+  // If the branch's commits aren't in the default branch as-is (normal after a squash merge),
+  // nothing is changed and { needsForce: true } comes back, unless `force` is set.
+  async finishBranch(repo, { force = false, deleteRemote = false } = {}) {
+    const st = await ops.status(repo);
+    if (st.op || st.conflicted.length) throw new GitError('Finish or abort what is in progress first (see the yellow banner).');
+    if (!st.branch) throw new GitError("You're not on a branch.");
+    if (st.staged.length + st.unstaged.length + st.untracked.length) throw new GitError('You have uncommitted changes on this branch. Commit them or put them on the Shelf first, so nothing is lost.', 'DIRTY');
+    const branch = st.branch;
+    const target = await ops.defaultBranch(repo);
+    if (!target || target === branch) throw new GitError(`${branch} is the main branch, so there's nothing to finish.`);
+    if (st.hasRemote) await run(repo, ['fetch', '--prune', '--quiet'], { background: true });
+    const oid = st.oid;
+    const isIn = async (ref) => (await run(repo, ['merge-base', '--is-ancestor', oid, ref], { quiet: true })).ok;
+    const merged = (await isIn(`refs/remotes/origin/${target}`)) || (await isIn(`refs/heads/${target}`));
+    if (!merged && !force) return { needsForce: true, branch, target };
+    const hasLocal = (await run(repo, ['rev-parse', '--verify', '-q', `refs/heads/${target}`], { quiet: true })).ok;
+    await must(repo, hasLocal ? ['switch', target] : ['switch', '-c', target, '--track', `origin/${target}`]);
+    let pulled = null;
+    const after = await ops.status(repo);
+    if (after.upstream && !after.upstreamGone) pulled = await ops.pull(repo, 'ff').catch((e) => ({ ok: false, output: e.message }));
+    await must(repo, ['branch', '-D', branch]);
+    const slash = st.upstream ? st.upstream.indexOf('/') : -1;
+    if (deleteRemote && slash > 0 && !st.upstreamGone) await must(repo, ['push', st.upstream.slice(0, slash), '--delete', st.upstream.slice(slash + 1)]);
+    return { ok: true, branch, target, oid, pulled: pulled ? !!pulled.ok : null };
   },
 
   // Bring another branch's new commits into the current one, by merge or by rebase.
@@ -842,6 +871,18 @@ const plans = {
     ...(remote ? [step(['push', remote.remote, '--delete', remote.branch], 'Also delete it on the server.')] : []),
   ],
   merge: (repo, branch) => [step(['merge', '--no-edit', '--autostash', branch], `Copy the commits from ${branch} into your current branch. If the same lines changed on both, you'll be asked to resolve conflicts.`)],
+  async finishBranch(repo, { deleteRemote = false } = {}) {
+    const st = await ops.status(repo);
+    const target = (await ops.defaultBranch(repo)) || 'main';
+    const slash = st.upstream ? st.upstream.indexOf('/') : -1;
+    return [
+      ...(st.hasRemote ? [step(['fetch', '--prune'], 'Ask the server what changed, so the merged work is known.')] : []),
+      step(['switch', target], `Go to ${target}.`),
+      ...(st.upstream ? [step(['pull', '--ff-only', '--autostash'], `Get the latest ${target}, which now includes your merged work.`)] : []),
+      step(['branch', '-D', st.branch], `Delete ${st.branch} on your computer. Undo can bring it back.`),
+      ...(deleteRemote && slash > 0 && !st.upstreamGone ? [step(['push', st.upstream.slice(0, slash), '--delete', st.upstream.slice(slash + 1)], 'Also delete it on the server.')] : []),
+    ];
+  },
   updateFrom: (repo, ref, mode = 'merge') => [mode === 'rebase'
     ? step(['rebase', '--autostash', ref], `Replay your commits on top of the latest ${ref}, as if you had started from there. Gives a straight history; your commits get new IDs.`)
     : step(['merge', '--no-edit', '--autostash', ref], `Bring ${ref}'s new commits into your branch with a merge commit. Nothing that's already there is rewritten.`)],
