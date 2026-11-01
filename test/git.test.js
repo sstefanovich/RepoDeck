@@ -430,6 +430,41 @@ test('discard one block of a file (and put it back), and shelve only some files'
   assert.equal((await ops.stashList(a))[0].message, 'just g and new');
 });
 
+test('tidy unsent commits: combine, reword, drop', async () => {
+  const srv = sb.server('tidy-commits');
+  const a = sb.repo('tidy-commits');
+  sb.write(a, 'a.txt', 'a\n');
+  await ops.commit(a, { message: 'base', paths: [], all: true });
+  await ops.addRemote(a, srv);
+  await ops.push(a);
+  await ops.createBranch(a, 'feature', null);
+  for (const [file, msg] of [['1.txt', 'wip'], ['2.txt', 'wip 2'], ['3.txt', 'oops, debug file'], ['4.txt', 'Add four']]) {
+    sb.write(a, file, `${file}\n`);
+    await ops.commit(a, { message: msg, paths: [], all: true });
+  }
+  const u = await ops.unsentCommits(a);
+  assert.deepEqual(u.commits.map((c) => c.message), ['wip', 'wip 2', 'oops, debug file', 'Add four'], 'oldest first, nothing from main');
+  const [c1, c2, c3, c4] = u.commits.map((c) => c.hash);
+  sb.write(a, 'wip.txt', 'uncommitted\n');
+  const r = await ops.tidyCommits(a, [
+    { hash: c1, action: 'pick', message: 'Add one and two\n\nCombined from two wip commits.' },
+    { hash: c2, action: 'squash' },
+    { hash: c3, action: 'drop' },
+    { hash: c4, action: 'pick', message: 'Add four (reworded)' },
+  ]);
+  assert.ok(r.ok, r.output);
+  const h = await ops.history(a);
+  assert.deepEqual(h.commits.map((c) => c.subject), ['Add four (reworded)', 'Add one and two', 'base']);
+  assert.ok(fs.existsSync(path.join(a, '2.txt')), 'the combined commit kept both files');
+  assert.ok(!fs.existsSync(path.join(a, '3.txt')), 'the dropped commit is gone');
+  assert.ok(fs.existsSync(path.join(a, 'wip.txt')), 'uncommitted work kept');
+  assert.match(sb.sh(a, 'log', '-1', '--format=%B', 'HEAD~1'), /Combined from two wip commits/);
+  await assert.rejects(ops.tidyCommits(a, [{ hash: c1, action: 'squash' }]), /combined into a kept commit/);
+  // After sending, nothing is left to tidy.
+  await ops.push(a);
+  assert.equal((await ops.unsentCommits(a)).commits.length, 0);
+});
+
 test('compare two branches', async () => {
   const a = sb.repo('compare');
   sb.write(a, 'keep.txt', 'k\n');

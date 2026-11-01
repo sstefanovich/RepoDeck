@@ -12,7 +12,7 @@ const MUTATING = new Set([
   'commit', 'discard', 'ignore', 'fetch', 'pull', 'push', 'addRemote', 'createBranch', 'switchBranch', 'checkoutRemote',
   'renameBranch', 'deleteBranch', 'merge', 'undoLastCommit', 'stashSave', 'stashApply', 'stashPop', 'stashDrop',
   'resolveSide', 'saveResolution', 'markResolved', 'abortOp', 'continueOp', 'skipOp', 'cherryPick', 'cherryPickOnto',
-  'clone', 'init', 'setIdentity', 'resetTo', 'restoreBranch', 'stashStore', 'updateFrom', 'revertCommit', 'finishBranch', 'discardLines', 'applyPatch',
+  'clone', 'init', 'setIdentity', 'resetTo', 'restoreBranch', 'stashStore', 'updateFrom', 'revertCommit', 'finishBranch', 'discardLines', 'applyPatch', 'tidyCommits',
 ]);
 let previewSuppressed = 0;
 const CANCELLED = 'CANCELLED';
@@ -1729,6 +1729,7 @@ function renderHistoryTab() {
       ${ref ? `<label class="check"><input type="checkbox" data-action="hist-notin" ${state.histNotIn ? 'checked' : ''}> Hide commits already in ${esc(cur)}</label>` : ''}
       <input class="filter" id="hist-search" placeholder="Search message, author or hash…" value="${esc(state.histQuery)}" spellcheck="false" aria-label="Search commits">
       ${state.histFile ? `<span class="chip on" title="${esc(state.histFile)}">Only changes to ${esc(basename(state.histFile))} <button class="chip-x" data-action="clear-file-history" aria-label="Show all commits">✕</button></span>` : ''}
+      ${!ref && !state.histFile && st.branch ? `<button class="btn ghost" data-action="tidy-commits" title="Combine, reword or drop commits you haven't sent yet (git rebase -i)">✎ Tidy unsent commits…</button>` : ''}
       <div class="spacer"></div>
       <div id="pick-bar" class="pick-bar"></div>
     </div>
@@ -1889,6 +1890,63 @@ async function loadCommitDetails() {
       </div>` : ''}
     </div>
     <div class="diff-scroll">${renderDiff(d.diff)}</div>`;
+}
+
+// Combine, reword or drop commits that haven't been sent yet.
+async function tidyCommits(repo) {
+  const st = state.status[repo] || {};
+  if (st.op) { toast('Finish or abort what is in progress first (see the yellow banner).', 'warn'); return; }
+  const u = await gitRaw('unsentCommits', repo).catch((e) => ({ error: e.message }));
+  if (u.error) { showError("Couldn't read your commits", new Error(u.error)); return; }
+  if (!u.commits.length) { toast('Nothing to tidy — every commit on this branch has been sent.', 'info'); return; }
+  if (u.hasMerge) { toast("Your unsent commits include a merge, which can't be tidied here.", 'warn'); return; }
+  const n = u.commits.length;
+  const r = await modal({
+    title: `Tidy ${plural(n, 'unsent commit')} on ${st.branch}`,
+    wide: true,
+    body: `<p class="hint">Oldest first. Only commits that haven't been sent are listed, so nobody else has them yet.${u.more ? ' (Showing the newest 50.)' : ''}</p>
+      <div class="tidy-list">${u.commits.map((c, i) => `<div class="tidy-commit" data-i="${i}">
+        <div class="tidy-head"><span class="mono">${c.short}</span>
+          <select name="act${i}" aria-label="What to do with ${esc(c.short)}">
+            <option value="pick">Keep</option>
+            ${i ? '<option value="squash">Combine into the one above</option>' : ''}
+            <option value="drop">Drop (throw away)</option>
+          </select></div>
+        <textarea name="msg${i}" rows="${Math.min(4, c.message.split('\n').length)}" aria-label="Message for ${esc(c.short)}" spellcheck="true">${esc(c.message)}</textarea>
+        <div class="tidy-note hint" hidden></div>
+      </div>`).join('')}</div>`,
+    buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'ok', label: 'Tidy commits', kind: 'primary' }],
+    init: (el) => {
+      // A combined commit's message goes into the commit it joins; dropped ones have none.
+      const sync = () => {
+        el.querySelectorAll('.tidy-commit').forEach((row) => {
+          const act = row.querySelector('select').value;
+          const note = row.querySelector('.tidy-note');
+          row.querySelector('textarea').hidden = act !== 'pick';
+          row.classList.toggle('dropped', act === 'drop');
+          note.hidden = act === 'pick';
+          note.textContent = act === 'drop' ? 'This commit and its changes will be removed.' : 'Its changes join the commit above; edit the message there.';
+        });
+      };
+      el.addEventListener('change', sync);
+      sync();
+    },
+  });
+  if (r.id !== 'ok') return;
+  const steps = u.commits.map((c, i) => {
+    const action = r.values[`act${i}`];
+    const msg = r.values[`msg${i}`].trim();
+    return { hash: c.hash, action, ...(action === 'pick' && msg !== c.message ? { message: msg } : {}) };
+  });
+  if (steps.every((s) => s.action === 'pick' && s.message == null)) { toast('Nothing changed.', 'info'); return; }
+  if (steps.some((s) => s.action === 'pick' && s.message === '')) { toast('A kept commit needs a message.', 'warn'); return; }
+  if (steps.every((s) => s.action === 'drop') && !(await confirmBox('Drop every unsent commit?', '<p>All your unsent commits and their changes will be removed from this branch. Undo can bring them back.</p>', 'Drop them all', true))) return;
+  try {
+    const before = await gitRaw('headOid', repo).catch(() => null);
+    const res = await busy(repo, 'Tidying commits…', () => git('tidyCommits', repo, steps));
+    if (await afterMaybeConflict(repo, res, null)) offerUndoMove(repo, before, 'Commits tidied.', `tidy of ${plural(n, 'commit')}`);
+    if (state.tab === 'history') loadHistory();
+  } catch (e) { showError("Couldn't tidy the commits", e); }
 }
 
 // Back out an older (or already sent) commit by adding one that does the opposite.
@@ -3409,6 +3467,7 @@ const actions = {
   'finish-branch': (t) => { closePopover(); finishBranch(t.dataset.repo || currentRepo()); },
   'ws-finish': () => wsFinish(),
   'discard-hunk': (t) => discardBlock(t.dataset.h),
+  'tidy-commits': () => tidyCommits(currentRepo()),
   'shelve-ticked': () => {
     const repo = currentRepo();
     const ticked = changedFiles(state.status[repo]).filter((f) => state.checked[repo]?.[f.path]);

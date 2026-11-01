@@ -30,9 +30,10 @@ const lit = (p) => `:(literal)${p}`;
 
 const quoteArg = (a) => (/[\s"']/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a);
 
-function run(cwd, args, { quiet = false, input, background = false, progressKey = null } = {}) {
+// extraEnv: added to git's environment for this one command.
+function run(cwd, args, { quiet = false, input, background = false, progressKey = null, extraEnv = null } = {}) {
   return new Promise((resolve) => {
-    const env = background ? { ...ENV, GCM_INTERACTIVE: 'never' } : ENV;
+    const env = { ...ENV, ...(background ? { GCM_INTERACTIVE: 'never' } : {}), ...extraEnv };
     const child = execFile(
       'git',
       ['-c', 'core.quotepath=false', '-c', 'color.ui=never', ...args],
@@ -480,6 +481,45 @@ const ops = {
     return { ok: true, branch, target, oid, pulled: pulled ? !!pulled.ok : null };
   },
 
+  // Commits on this branch that haven't been sent, oldest first — the ones that are safe to rewrite.
+  async unsentCommits(repo) {
+    const st = await ops.status(repo);
+    if (!st.branch || st.initial) return { commits: [] };
+    let range;
+    if (st.upstream && !st.upstreamGone) range = ['@{u}..HEAD'];
+    else if (st.hasRemote) range = ['HEAD', '--not', '--remotes'];
+    else {
+      const def = await ops.defaultBranch(repo);
+      range = def && def !== st.branch ? ['HEAD', '--not', `refs/heads/${def}`] : ['HEAD'];
+    }
+    const r = await must(repo, ['log', '-n51', '--reverse', '--format=%H%x1f%h%x1f%P%x1f%B%x1e', ...range], { quiet: true });
+    let commits = r.stdout.split('\x1e').map((s) => s.replace(/^\s+/, '')).filter(Boolean).map((rec) => {
+      const [hash, short, parents, message] = rec.split('\x1f');
+      return { hash, short, parents: parents ? parents.split(' ') : [], message: (message || '').trim() };
+    });
+    // `log -n51 --reverse` takes the newest 51 first, so dropping the oldest keeps the newest 50.
+    const more = commits.length > 50;
+    if (more) commits = commits.slice(1);
+    return { commits, more, hasMerge: commits.some((c) => c.parents.length > 1) };
+  },
+
+  // Rewrites unsent commits. steps (oldest first): [{ hash, action: 'pick'|'squash'|'drop', message? }].
+  // 'squash' folds a commit into the one before it; a message on a pick (or on the first commit of a
+  // squashed group) replaces that commit's message.
+  async tidyCommits(repo, steps) {
+    const { todo, files } = tidyTodo(steps);
+    const first = steps[0].hash;
+    const root = !(await run(repo, ['rev-parse', '--verify', '-q', `${first}^`], { quiet: true })).ok;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'repodeck-tidy-'));
+    const todoFile = path.join(dir, 'todo');
+    fs.writeFileSync(todoFile, todo.map((l) => l.replace('{dir}', dir.replace(/\\/g, '/'))).join('\n') + '\n');
+    for (const [name, text] of Object.entries(files)) fs.writeFileSync(path.join(dir, name), text);
+    // git runs the "sequence editor" with its own to-do file as the argument: replace it with ours.
+    const editor = `cp "${todoFile.replace(/\\/g, '/')}"`;
+    const r = await run(repo, ['rebase', '-i', '--autostash', ...(root ? ['--root'] : [`${first}^`])], { extraEnv: { GIT_SEQUENCE_EDITOR: editor } });
+    return withConflicts(repo, r);
+  },
+
   // Bring another branch's new commits into the current one, by merge or by rebase.
   async updateFrom(repo, ref, mode = 'merge') {
     const args = mode === 'rebase' ? ['rebase', '--autostash', ref] : ['merge', '--no-edit', '--autostash', ref];
@@ -806,6 +846,35 @@ const ops = {
 const autoShelfMessage = (from, to) => `[auto] ${from}: left behind when switching to ${to}`;
 const revertShelfMessage = (branch) => `[auto] ${branch}: set aside while reversing a commit`;
 
+// The rebase to-do list for tidyCommits, and the message files its "exec" lines read ({dir} is
+// replaced with their folder). A message is applied after the last commit squashed into it.
+function tidyTodo(steps) {
+  const todo = [];
+  const files = {};
+  let group = null; // the kept commit that following "squash" steps fold into
+  const close = () => {
+    if (group?.message != null) {
+      const name = `msg${group.index}.txt`;
+      files[name] = group.message.trim() + '\n';
+      todo.push(`exec git commit --amend --only -q -F "{dir}/${name}"`);
+    }
+    group = null;
+  };
+  steps.forEach((s, i) => {
+    if (s.action === 'drop') { todo.push(`drop ${s.hash}`); return; }
+    if (s.action === 'squash') {
+      if (!group) throw new GitError('A commit can only be combined into a kept commit before it.');
+      todo.push(`fixup ${s.hash}`);
+      return;
+    }
+    close();
+    group = { index: i, message: s.message };
+    todo.push(`pick ${s.hash}`);
+  });
+  close();
+  return { todo, files };
+}
+
 // One patch per partly-ticked file, made from a fresh diff so it matches the files on disk.
 async function partialPatches(repo, partial) {
   const patches = [];
@@ -903,6 +972,16 @@ const plans = {
       ...(st.upstream ? [step(['pull', '--ff-only', '--autostash'], `Get the latest ${target}, which now includes your merged work.`)] : []),
       step(['branch', '-D', st.branch], `Delete ${st.branch} on your computer. Undo can bring it back.`),
       ...(deleteRemote && slash > 0 && !st.upstreamGone ? [step(['push', st.upstream.slice(0, slash), '--delete', st.upstream.slice(slash + 1)], 'Also delete it on the server.')] : []),
+    ];
+  },
+  tidyCommits: (repo, steps) => {
+    const { todo } = tidyTodo(steps);
+    const words = { pick: 'keep', fixup: 'combine into the one above', drop: 'drop' };
+    return [
+      step(['rebase', '-i', '--autostash', `${steps[0].hash.slice(0, 10)}^`], 'Replay your unsent commits with these changes (oldest first). They get new IDs; nothing on the server is touched.'),
+      ...todo.map((l) => (l.startsWith('exec')
+        ? info('…then change that commit\'s message to the one you wrote.')
+        : info(`${words[l.split(' ')[0]]}: ${l.split(' ')[1].slice(0, 7)}`))),
     ];
   },
   updateFrom: (repo, ref, mode = 'merge') => [mode === 'rebase'
