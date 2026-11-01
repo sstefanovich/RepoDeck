@@ -206,7 +206,7 @@ a { color: var(--accent); }
 .repo-header { padding: 16px 22px 10px; background: var(--panel); border-bottom: 1px solid var(--border); }
 .rh-top { display: flex; align-items: center; gap: 4px; }
 .rh-title { min-width: 0; }
-.rh-bar { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+.rh-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-top: 12px; }
 .branch-pill {
   font: inherit; display: inline-flex; gap: 6px; align-items: center; cursor: pointer;
   padding: 6px 12px; border-radius: 20px; border: 1px solid var(--border); background: var(--panel-2); color: var(--text);
@@ -249,7 +249,8 @@ a { color: var(--accent); }
 .pane-right { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
 
 /* file list */
-.list-head { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--border); min-height: 42px; }
+.list-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--border); min-height: 42px; }
+.list-head .check { white-space: nowrap; }
 .list-head:empty { display: none; }
 .file-list { flex: 1; overflow-y: auto; min-height: 0; }
 .file { display: flex; align-items: center; gap: 8px; padding: 5px 10px; cursor: pointer; border-left: 3px solid transparent; }
@@ -275,7 +276,9 @@ input, textarea, select {
 }
 input:focus, textarea:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 textarea { resize: vertical; }
-.commit-actions { display: flex; gap: 6px; }
+.commit-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+/* Long branch names shorten the button label with "…" (the full text is in its tooltip). */
+.commit-actions .btn { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 input.filter { width: 260px; }
 
 /* empty states */
@@ -294,7 +297,8 @@ input.filter { width: 260px; }
 .tag.remote { font-weight: 500; }
 
 /* diff */
-.diff-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; min-height: 42px; }
+.diff-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; min-height: 42px; }
+.diff-head > b { overflow-wrap: anywhere; }
 .diff-head.wrap { flex-wrap: wrap; }
 .diff-scroll { flex: 1; overflow: auto; min-height: 0; }
 .diff { font: 12.5px/1.55 var(--mono); min-width: max-content; }
@@ -312,13 +316,14 @@ input.filter { width: 260px; }
 
 /* rows (branches) */
 .rows { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); }
-.row { display: flex; align-items: center; gap: 14px; padding: 9px 14px; border-bottom: 1px solid var(--border); }
+/* Rows wrap the status and buttons onto a second line rather than squeezing the name under them. */
+.row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 9px 14px; border-bottom: 1px solid var(--border); }
 .row:last-child { border-bottom: none; }
 .row.current { background: var(--accent-soft); }
-.row-main { flex: 1; min-width: 0; }
-.row-title { font-weight: 600; }
+.row-main { flex: 1 1 260px; min-width: 0; }
+.row-title { font-weight: 600; overflow-wrap: anywhere; }
 .row-sub { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.row-status { display: flex; gap: 4px; }
+.row-status { display: flex; gap: 4px; margin-left: auto; }
 .row-actions { display: flex; gap: 6px; align-items: center; }
 
 /* history / shelf */
@@ -334,6 +339,7 @@ input.filter { width: 260px; }
 .cd-subject { font-size: 16px; font-weight: 600; }
 .cd-body { white-space: pre-wrap; font-family: inherit; margin: 8px 0; color: var(--text); }
 .cd-meta { color: var(--muted); font-size: 12px; margin-top: 4px; }
+.commit-subject .tag { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .cd-actions { display: flex; gap: 10px; align-items: center; margin-top: 10px; }
 .cd-actions .hint { margin: 0; }
 .explain { background: var(--accent-soft); border-radius: var(--radius); padding: 10px 14px; margin-bottom: 12px; flex-shrink: 0; }

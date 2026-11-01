@@ -1115,7 +1115,7 @@ function renderBranchesTab() {
   const b = state.branches;
   const st = state.status[currentRepo()] || {};
   const cur = st.branch;
-  const head = `<div class="toolbar">
+  const head = `<div class="toolbar wrap">
       <button class="btn primary" data-action="new-branch" data-repo="${esc(currentRepo())}">⎇ New branch…</button>
       <input class="filter" id="branch-filter" placeholder="Filter branches…" spellcheck="false" aria-label="Filter branches">
       <button class="btn ghost" data-action="tidy" data-repo="${esc(currentRepo())}" title="Delete branches that were merged or deleted on the server">🧹 Tidy up…</button>
@@ -1328,9 +1328,10 @@ function showHistoryOf(ref) {
 function refTags(refs) {
   return refs.map((r) => {
     if (r === 'HEAD') return '';
-    if (r.startsWith('HEAD -> ')) return `<span class="tag current">${esc(r.slice(8))}</span>`;
-    if (r.startsWith('tag: ')) return `<span class="tag">🏷 ${esc(r.slice(5))}</span>`;
-    return `<span class="tag ${r.includes('/') ? 'remote' : ''}">${esc(r)}</span>`;
+    // title shows the full name when a long one is cut short.
+    if (r.startsWith('HEAD -> ')) return `<span class="tag current" title="${esc(r.slice(8))}">${esc(r.slice(8))}</span>`;
+    if (r.startsWith('tag: ')) return `<span class="tag" title="${esc(r.slice(5))}">🏷 ${esc(r.slice(5))}</span>`;
+    return `<span class="tag ${r.includes('/') ? 'remote' : ''}" title="${esc(r)}">${esc(r)}</span>`;
   }).join(' ');
 }
 
@@ -3073,7 +3074,14 @@ async function init() {
     document.querySelectorAll('.busy').forEach((b) => b.remove());
     onStatusChanged([p.key]);
   });
-  api.onRepoChanged(async (repo) => { if (await refreshRepo(repo)) onStatusChanged([repo]); });
+  api.onRepoChanged(async (repo) => {
+    if (await refreshRepo(repo)) onStatusChanged([repo]);
+    // Status doesn't cover branches or stashes made elsewhere (e.g. `git branch foo`), so reload the open list.
+    else if (state.view.type === 'repo' && samePath(repo, state.view.path)) {
+      if (state.tab === 'branches') loadBranches();
+      else if (state.tab === 'shelf') loadShelf();
+    }
+  });
   api.onUpdate((u) => toast(`RepoDeck ${u.version} is ready to install.`, 'info', { label: 'Restart now', fn: () => api.restartToUpdate() }));
   await loadChats();
   if (state.config.settings.claudeOpen) toggleClaude(true);
