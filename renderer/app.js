@@ -692,6 +692,7 @@ function syncText(st) {
   if (st.detached) return 'Not on a branch';
   if (st.initial) return 'No commits yet';
   if (!st.hasRemote) return 'No server set up — this repo only exists on your computer';
+  if (st.upstreamGone) return 'Deleted on the server';
   if (!st.upstream) return 'This branch isn\'t on the server yet — click <b>Publish branch</b> to share it';
   const bits = [];
   if (st.ahead) bits.push(`<b>${st.ahead}</b> to send`);
@@ -801,7 +802,7 @@ function repoHeaderHtml(repo) {
   const checked = state.lastFetch[repo] ? `checked ${timeAgo(state.lastFetch[repo] / 1000)}` : '';
   const sync = syncText(st);
   const noServer = !st.hasRemote && !st.detached;
-  const prable = st.upstream && !st.ahead && !['main', 'master', 'develop'].includes(st.branch);
+  const prable = st.upstream && !st.upstreamGone && !st.ahead && !['main', 'master', 'develop'].includes(st.branch);
   const pushBtn = noServer
     ? `<button class="btn ${st.initial ? '' : 'primary'}" data-action="add-remote" data-repo="${esc(repo)}" ${d} title="git remote add — connect this repo to a server such as GitHub">⇪ Add server…</button>`
     : `<button class="btn ${st.ahead || (!st.upstream && !st.initial && !st.detached) ? 'primary' : ''}" data-action="push" data-repo="${esc(repo)}" ${d} title="git push — uploads your commits to the server">↑ ${st.upstream || st.detached ? 'Send' : 'Publish branch'}${st.ahead ? ` (${st.ahead})` : ''}</button>`;
@@ -1871,20 +1872,21 @@ async function loadBlame() {
     else groups.push({ hash: l.hash, lines: [l] });
   }
   const lang = langOf(file);
-  const meta = (g) => {
-    if (/^0+$/.test(g.hash)) return '<span class="bl-meta"><span class="muted">Not committed yet</span></span>';
+  // Each group of lines gets a header saying which commit last changed them (fits any width).
+  const head = (g) => {
+    if (/^0+$/.test(g.hash)) return '<div class="bl-head"><span class="muted">Not committed yet</span></div>';
     const c = b.commits[g.hash];
     const from = g.lines[0].n;
     const to = g.lines[g.lines.length - 1].n;
-    return `<span class="bl-meta"><button class="bl-hash mono" data-action="blame-commit" data-hash="${g.hash}" title="Show this commit">${g.hash.slice(0, 7)}</button>
-      <span class="bl-who">${esc(c.author)} · ${timeAgo(c.time)}</span>
+    return `<div class="bl-head"><button class="bl-hash mono" data-action="blame-commit" data-hash="${g.hash}" title="Show this commit">${g.hash.slice(0, 7)}</button>
       <span class="bl-sum" title="${esc(c.summary)}">${esc(c.summary)}</span>
-      <button class="icon-btn bl-explain" data-action="blame-explain" data-hash="${g.hash}" data-from="${from}" data-to="${to}" title="Ask Claude why these lines were changed">✦</button></span>`;
+      <span class="bl-who">${esc(c.author)} · ${timeAgo(c.time)}</span>
+      <button class="icon-btn bl-explain" data-action="blame-explain" data-hash="${g.hash}" data-from="${from}" data-to="${to}" title="Ask Claude why these lines were changed">✦</button></div>`;
   };
-  const html = groups.map((g, gi) => g.lines.map((l, i) => `<div class="bl g${gi % 2} ${i ? '' : 'first'}">${i ? '<span class="bl-meta"></span>' : meta(g)}<span class="ln">${l.n}</span><span class="code">${highlight(l.text, lang) || ' '}</span></div>`).join('')).join('');
+  const html = groups.map((g) => `<div class="bl-group">${head(g)}${g.lines.map((l) => `<div class="bl"><span class="ln">${l.n}</span><span class="code">${highlight(l.text, lang) || ' '}</span></div>`).join('')}</div>`).join('');
   const shaped = Object.keys(b.commits).filter((h) => !/^0+$/.test(h)).length;
   pane.innerHTML = `<div class="diff-head"><b>${esc(file)}</b><span class="muted small">${plural(shaped, 'commit')} shaped this file as it is now${b.truncated ? ' (showing the first 20,000 lines)' : ''}</span></div>
-    <div class="diff-scroll"><div class="blame">${html}</div></div>`;
+    <div class="diff-scroll blame-scroll"><div class="blame">${html}</div></div>`;
 }
 
 // Search hides non-matching rows (and the graph, whose lines would no longer join up).
@@ -1997,7 +1999,8 @@ async function loadCommitDetails() {
   if (state.selCommit !== hash || !$('#commit-pane')) return;
   const h = state.history;
   const isHead = !state.histRef && h.commits[0]?.hash === hash;
-  const canUndo = isHead && d.parents.length === 1 && (!h.upstream || h.unpushed.includes(hash));
+  // A branch whose server copy was deleted has no upstream to compare with, but its commits were sent.
+  const canUndo = isHead && d.parents.length === 1 && !state.status[repo]?.upstreamGone && (!h.upstream || h.unpushed.includes(hash));
   const inList = h.commits.some((c) => c.hash === hash);
   const cur = state.status[repo]?.branch || 'here';
   const [subject, ...rest] = d.message.split('\n');
