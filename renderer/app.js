@@ -108,6 +108,7 @@ const state = {
   repoTabs: {},       // repo -> last inner tab (Changes/Branches/...) used there
   previewOpen: false, // a command preview is showing (so nothing is running yet)
   progress: {},       // repo (or 'clone') -> { text, percent } for long operations
+  undos: [],          // recent actions that can be undone, newest first (see recordUndo)
   histFile: null,     // History: only commits touching this file
   histQuery: '',      // History: search text
 };
@@ -272,33 +273,97 @@ function toast(msg, kind = 'info', action = null) {
 }
 
 // ---------- undo ----------
-// After an action, offer to put things back. `undo` performs the reversal.
-function undoToast(msg, repo, label, undo) {
-  toast(msg, 'ok', {
-    label: 'Undo',
-    fn: async () => {
-      try { await busy(repo, 'Undoing…', undo); toast(`Undone: ${label}.`, 'ok'); }
-      catch (e) { showError("Couldn't undo", e); }
-    },
+// Every action that can be undone goes in state.undos (newest first) for the rest of the session,
+// as well as getting an Undo button in its message. Each entry:
+// { id, label, repos, time, run(), check() } — check returns why it can no longer be undone, if it can't.
+const MAX_UNDOS = 15;
+
+function recordUndo({ label, repos, run, check }) {
+  const entry = { id: uid(), label, repos, time: Date.now(), run, check };
+  state.undos = [entry, ...state.undos].slice(0, MAX_UNDOS);
+  undosChanged();
+  return entry;
+}
+
+async function runUndo(id) {
+  const entry = state.undos.find((u) => u.id === id);
+  if (!entry) { toast('That was already undone.', 'info'); return; }
+  closePopover();
+  const why = await entry.check?.().catch(() => null);
+  if (why) {
+    state.undos = state.undos.filter((u) => u !== entry);
+    undosChanged();
+    await modal({ title: "Can't undo that any more", body: `<p>${esc(why)}</p><p class="hint">To back out a commit that's already in the history, use <b>Reverse this commit</b> in History.</p>` });
+    return;
+  }
+  try {
+    // Undos that span several repos show their own progress per repo.
+    if (entry.repos.length > 1) await entry.run();
+    else await busy(entry.repos[0], 'Undoing…', entry.run);
+    state.undos = state.undos.filter((u) => u !== entry);
+    undosChanged();
+    toast(`Undone: ${entry.label}.`, 'ok');
+  } catch (e) { showError("Couldn't undo", e); }
+  if (state.view.type === 'repo' && ['branches', 'history'].includes(state.tab)) renderTab();
+}
+
+// Shows or hides the Undo buttons to match the list.
+function undosChanged() {
+  if (state.view.type === 'repo' && $('#repo-header')) updateRepoChrome();
+  const ws = $('#ws-undo');
+  if (ws) ws.innerHTML = undoButtonHtml();
+}
+
+const undoButtonHtml = () => (state.undos.length
+  ? `<button class="btn ghost" data-action="undo-list" title="Undo something you did recently (Ctrl+Z)" aria-haspopup="menu">↶ Undo…</button>` : '');
+
+function openUndoList(anchor) {
+  if (!state.undos.length) { toast('Nothing to undo yet.', 'info'); return; }
+  popover(anchor, `<div class="undo-list" role="menu">
+      ${state.undos.map((u) => `<div class="undo-item">
+        <div class="undo-text"><div>${esc(u.label[0].toUpperCase() + u.label.slice(1))}</div><div class="muted small">${esc(u.repos.map(basename).join(', '))} · ${timeAgo(u.time / 1000)}</div></div>
+        <button class="btn small" role="menuitem" data-action="undo-run" data-id="${u.id}">Undo</button></div>`).join('')}
+    </div>
+    <p class="hint pad-x">Actions from this session, newest first. Anything already sent to the server can't be undone here.</p>`, {
+    width: 340,
+    onOpen: (el) => el.querySelector('button')?.focus(),
   });
 }
 
-// Undo for something that moved the branch (commit, merge, pull, cherry-pick): go back to `before`.
+// After an action, offer to put things back. `undo` performs the reversal; `check` (optional)
+// says why it no longer can be.
+function undoToast(msg, repo, label, undo, check) {
+  const entry = recordUndo({ label, repos: [repo], run: undo, check });
+  toast(msg, 'ok', { label: 'Undo', fn: () => runUndo(entry.id) });
+}
+
+// Undo for something that moved the branch (commit, merge, pull, cherry-pick): go back to `before`,
+// as long as the branch is still where the action left it.
 async function offerUndoMove(repo, before, msg, label, { soft = false } = {}) {
   const after = await gitRaw('headOid', repo).catch(() => null);
   if (!before || !after || before === after) { toast(msg, 'ok'); return; }
-  undoToast(msg, repo, label, async () => {
-    if (await gitRaw('isPushed', repo, after)) throw new Error('This has already been sent to the server, so undoing it here would make your branch disagree with the server. Ask Claude or a teammate how to revert it instead.');
-    await git('resetTo', repo, before, soft ? 'soft' : 'keep');
-  });
+  const branch = state.status[repo]?.branch;
+  undoToast(msg, repo, label, () => undoMove(repo, before, after, soft), () => moveUndoBlocked(repo, branch, after));
 }
 
-async function resultsModal(title, results) {
+async function moveUndoBlocked(repo, branch, after) {
+  const st = state.status[repo] || {};
+  if (st.branch !== branch) return `${basename(repo)} has switched from ${branch} to ${st.branch || 'another commit'} since, so undoing now would change the wrong branch.`;
+  if ((await gitRaw('headOid', repo).catch(() => null)) !== after) return `${branch} in ${basename(repo)} has changed since (new commits, or another undo), so undoing now could lose newer work.`;
+  if (await gitRaw('isPushed', repo, after)) return 'This has already been sent to the server, so undoing it here would make your branch disagree with the server.';
+  return null;
+}
+
+const undoMove = (repo, before, after, soft) => git('resetTo', repo, before, soft ? 'soft' : 'keep');
+
+// note: optional HTML shown under the list.
+async function resultsModal(title, results, note = '') {
   await modal({
     title,
     body: `<ul class="results">${results.map((r) => `<li class="${r.ok ? 'ok' : r.warn ? 'warn' : 'bad'}">
       <span class="ri">${r.ok ? '✓' : r.warn ? '!' : '✕'}</span>
-      <div><b>${esc(basename(r.repo))}</b> — ${esc(r.msg)}${r.raw ? `<details><summary>details</summary><pre class="raw">${esc(r.raw)}</pre></details>` : ''}</div></li>`).join('')}</ul>`,
+      <div><b>${esc(basename(r.repo))}</b> — ${esc(r.msg)}${r.raw ? `<details><summary>details</summary><pre class="raw">${esc(r.raw)}</pre></details>` : ''}</div></li>`).join('')}</ul>
+      ${note ? `<p class="hint">${note}</p>` : ''}`,
   });
 }
 
@@ -523,6 +588,7 @@ function openWorkspace(id) {
     <div class="page-head">
       <div><h1>${esc(w.name)}</h1><div class="muted">${plural(w.repos.length, 'repo')} · actions here run on every repo in the workspace</div></div>
       <div class="spacer"></div>
+      <span id="ws-undo">${undoButtonHtml()}</span>
       <button class="btn ghost" data-action="ws-rename">Rename</button>
       <button class="btn ghost" data-action="ws-delete">Remove workspace</button>
     </div>
@@ -533,6 +599,7 @@ function openWorkspace(id) {
       <span class="sep"></span>
       <button class="btn" data-action="ws-new-branch" title="git switch -c — the same new branch in several repos">⎇ New branch in all…</button>
       <button class="btn" data-action="ws-switch" title="git switch — move every repo to the same branch">⇄ Switch all to branch…</button>
+      <button class="btn" data-action="ws-update-from" title="Bring the new commits from dev, main or any branch into every repo">⤓ Update all from…</button>
       <span class="sep"></span>
       <button class="btn" data-action="ws-tidy" title="Delete branches that were merged or deleted on the server">🧹 Tidy up branches…</button>
       <button class="btn" data-action="ws-open-editor">Open all in ${esc(editorName())}</button>
@@ -659,7 +726,7 @@ function repoHeaderHtml(repo) {
   const st = state.status[repo] || {};
   const b = state.busy[repo];
   const d = b ? 'disabled' : '';
-  const tools = `<button class="btn ghost" data-action="open-menu" data-repo="${esc(repo)}" aria-haspopup="menu">Open ▾</button>
+  const tools = `${undoButtonHtml()}<button class="btn ghost" data-action="open-menu" data-repo="${esc(repo)}" aria-haspopup="menu">Open ▾</button>
     <button class="btn ghost" data-action="claude-open" title="Ask Claude about this repo (Ctrl+J)">✦ Ask Claude</button>`;
   const top = `<div class="rh-top"><div class="rh-title"><h1>${esc(basename(repo))}</h1><div class="path">${esc(repo)}</div></div><div class="spacer"></div>${tools}</div>`;
   if (st.missing || st.error) {
@@ -1091,7 +1158,7 @@ async function doCommit(repo, thenPush) {
     loadLastCommit();
     if (thenPush) await doPush(repo);
     // Undo keeps the changes (soft reset), so they go back to the Changes tab.
-    else if (before) offerUndoMove(repo, before, amend ? 'Last commit amended.' : `Committed to ${st.branch}.`, amend ? 'amend' : 'commit', { soft: true });
+    else if (before) offerUndoMove(repo, before, amend ? 'Last commit amended.' : `Committed to ${st.branch}.`, amend ? `amend of “${summary}”` : `commit “${summary}”`, { soft: true });
     else toast(`Committed to ${st.branch}.`, 'ok');
   } catch (e) { showError("Couldn't commit", e); }
 }
@@ -1126,7 +1193,7 @@ async function doPull(repo) {
     }
     if (!(await afterMaybeConflict(repo, r, null))) return false;
     if (/Already up to date/i.test(r.output || '')) toast('Already up to date.', 'ok');
-    else offerUndoMove(repo, before, 'Got the latest changes.', 'get latest');
+    else offerUndoMove(repo, before, 'Got the latest changes.', `get latest on ${st.branch}`);
     return true;
   } catch (e) { showError("Couldn't get the latest", e); return false; }
 }
@@ -1348,7 +1415,7 @@ async function mergeBranch(repo, name) {
     const r = await busy(repo, 'Merging…', () => git('merge', repo, name));
     if (await afterMaybeConflict(repo, r, null)) {
       if (/Already up to date/i.test(r.output || '')) toast(`${st.branch} already has everything from ${name}.`, 'ok');
-      else offerUndoMove(repo, before, `Merged ${name} into ${st.branch}.`, 'merge');
+      else offerUndoMove(repo, before, `Merged ${name} into ${st.branch}.`, `merge of ${name} into ${st.branch}`);
     }
     if (state.tab === 'branches') loadBranches();
   } catch (e) { showError("Couldn't merge", e); }
@@ -1645,7 +1712,7 @@ async function cherryPickHere(repo, hashes) {
     const res = await busy(repo, 'Cherry-picking…', () => git('cherryPick', repo, commits.map((c) => c.hash), { x: r.values.x }));
     state.picks.clear();
     if (await afterMaybeConflict(repo, res, null)) {
-      if (res.picked) offerUndoMove(repo, before, `Copied ${plural(res.picked, 'commit')} into ${cur}.`, 'cherry-pick');
+      if (res.picked) offerUndoMove(repo, before, `Copied ${plural(res.picked, 'commit')} into ${cur}.`, `cherry-pick into ${cur}`);
       else toast(`Nothing new to copy — ${cur} already has those changes.`, 'ok');
     }
     if (state.tab === 'history') loadHistory();
@@ -2201,6 +2268,132 @@ async function wsPush() {
   if (results) resultsModal('Send — results', results);
 }
 
+// Bring the same branch (dev, main…) into every repo's current branch.
+async function wsUpdateFrom() {
+  const w = currentWs();
+  const repos = w.repos.filter((p) => { const st = state.status[p] || {}; return !st.error && !st.missing; });
+  if (!repos.length) return;
+  // "dev" usually means the server's copy, so make sure those are fresh.
+  const stale = repos.filter((p) => state.status[p]?.hasRemote && Date.now() - (state.lastFetch[p] || 0) > 2 * 60000);
+  if (stale.length) {
+    await forEachRepo('Checking…', stale, async (p) => { await gitRaw('fetch', p, { background: true }); state.lastFetch[p] = Date.now(); return { ok: true }; });
+  }
+  const info = await Promise.all(repos.map(async (p) => ({ repo: p, b: await gitRaw('branches', p).catch(() => null) })));
+  // dev and origin/dev count as one name; each repo uses the server's copy when it has one.
+  const names = new Map();
+  for (const { b } of info) {
+    if (!b) continue;
+    for (const n of new Set([...b.local.map((x) => x.name), ...b.remote.map((x) => x.branch)])) names.set(n, (names.get(n) || 0) + 1);
+  }
+  const refFor = (repo, name) => {
+    const b = info.find((x) => x.repo === repo)?.b;
+    const remote = b?.remote.find((x) => x.branch === name && x.remote === 'origin') || b?.remote.find((x) => x.branch === name);
+    if (remote) return remote.name;
+    return b?.local.some((x) => x.name === name) ? name : null;
+  };
+  const sorted = [...names.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  if (!sorted.length) return;
+  const pick = [state.config.updateFromWs?.[w.id], 'develop', 'dev', 'main', 'master'].find((n) => n && names.has(n)) || sorted[0][0];
+  const plan = new Map(); // repo -> { ref, canRebase }
+  const r = await modal({
+    title: 'Update every repo from a branch',
+    wide: true,
+    body: `<label class="field"><span>Bring in the new commits from</span><select name="name">${sorted.map(([n, c]) => `<option value="${esc(n)}" ${n === pick ? 'selected' : ''}>${esc(n)} — in ${c} of ${repos.length} repos</option>`).join('')}</select></label>
+      <div class="field"><span>Into each repo's current branch</span><div class="wu-rows" id="wu-rows"></div></div>
+      <div class="field"><span>How</span>
+        <label class="check"><input type="radio" name="mode" value="merge" checked> <span><b>Merge</b> (recommended) — adds a merge commit. Nothing you've already made is rewritten.</span></label>
+        <label class="check" id="wu-rebase"><input type="radio" name="mode" value="rebase"> <span><b>Rebase</b> — replays your commits on top, for a straight history.</span></label>
+      </div>
+      <p class="hint">Each repo uses the server's copy of the branch (e.g. origin/dev) when there is one. Uncommitted changes are set aside and put back. Repos that hit a conflict stop there for you to resolve or abort; the others carry on.</p>`,
+    buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'ok', label: 'Update', kind: 'primary' }],
+    init: (el) => {
+      const sel = el.querySelector('[name=name]');
+      const rows = el.querySelector('#wu-rows');
+      const ok = el.querySelector('[data-close=ok]');
+      const rebase = el.querySelector('[value=rebase]');
+      const refresh = () => {
+        const ticked = [...rows.querySelectorAll('input:checked')].map((i) => i.value);
+        ok.disabled = !ticked.length;
+        const blocked = ticked.filter((p) => plan.get(p) && !plan.get(p).canRebase);
+        rebase.disabled = blocked.length > 0;
+        if (rebase.disabled && rebase.checked) el.querySelector('[value=merge]').checked = true;
+        el.querySelector('#wu-rebase').title = blocked.length ? `Not available: ${blocked.map(basename).join(', ')} already sent commits to the server, and rebasing would rewrite them.` : 'git rebase';
+      };
+      const show = async () => {
+        const name = sel.value;
+        plan.clear();
+        rows.innerHTML = repos.map((p) => `<label class="check wu-row"><input type="checkbox" name="repos" data-multi="1" value="${esc(p)}" disabled>
+          <b>${esc(basename(p))}</b> <span class="muted small">on ${esc(state.status[p]?.branch || '?')}</span><span class="wu-info" data-repo="${esc(p)}"><span class="spinner sm"></span></span></label>`).join('');
+        refresh();
+        await Promise.all(repos.map(async (p) => {
+          const st = state.status[p] || {};
+          const ref = refFor(p, name);
+          let text;
+          let tick = false;
+          if (st.op) text = `a ${st.op.kind} is in progress — finish it first`;
+          else if (!st.branch) text = 'not on a branch';
+          else if (st.branch === name) text = `is on ${name} itself — use Get latest`;
+          else if (!ref) text = `doesn't have ${name}`;
+          else {
+            const c = await gitRaw('compareCounts', p, ref).catch(() => null);
+            if (c) plan.set(p, { ref, canRebase: c.canRebase });
+            text = !c ? "couldn't compare" : c.behind ? `${plural(c.behind, 'commit')} coming from ${ref}` : 'already has everything';
+            tick = !!c?.behind;
+          }
+          if (sel.value !== name || !el.isConnected) return;
+          const box = rows.querySelector(`input[value="${CSS.escape(p)}"]`);
+          box.disabled = !tick;
+          box.checked = tick;
+          rows.querySelector(`.wu-info[data-repo="${CSS.escape(p)}"]`).textContent = text;
+        }));
+        if (sel.value === name) refresh();
+      };
+      sel.addEventListener('change', show);
+      rows.addEventListener('change', refresh);
+      show();
+    },
+  });
+  const picked = (r.values.repos || []).filter((p) => plan.has(p));
+  if (r.id !== 'ok' || !picked.length) return;
+  const name = r.values.name;
+  const mode = r.values.mode;
+  state.config.updateFromWs = { ...state.config.updateFromWs, [w.id]: name };
+  saveConfig();
+  const before = Object.fromEntries(await Promise.all(picked.map(async (p) => [p, await gitRaw('headOid', p).catch(() => null)])));
+  const results = await forEachRepo(`Updating from ${name}…`, picked, async (repo) => {
+    const res = await git('updateFrom', repo, plan.get(repo).ref, mode);
+    if (res.conflicts) return { ok: false, msg: 'stopped at a conflict — open this repo to resolve it, or abort' };
+    return { ok: true, msg: /up to date/i.test(res.output || '') ? 'already up to date' : `updated from ${plan.get(repo).ref}` };
+  }, (repo) => ['updateFrom', repo, plan.get(repo).ref, mode]);
+  if (!results) return;
+  // One undo puts every repo that moved back where it was.
+  const moved = [];
+  for (const res of results.filter((x) => x.ok)) {
+    const after = await gitRaw('headOid', res.repo).catch(() => null);
+    if (after && before[res.repo] && after !== before[res.repo]) moved.push({ repo: res.repo, before: before[res.repo], after, branch: state.status[res.repo]?.branch });
+  }
+  if (moved.length) {
+    recordUndo({
+      label: `update of ${plural(moved.length, 'repo')} from ${name}`,
+      repos: moved.map((m) => m.repo),
+      check: async () => {
+        for (const m of moved) { const why = await moveUndoBlocked(m.repo, m.branch, m.after); if (why) return why; }
+        return null;
+      },
+      run: async () => {
+        const res = await forEachRepo('Undoing…', moved.map((m) => m.repo), async (repo) => {
+          const m = moved.find((x) => x.repo === repo);
+          await undoMove(repo, m.before, m.after, false);
+          return { ok: true };
+        });
+        const bad = (res || []).filter((x) => !x.ok);
+        if (bad.length) throw new Error(bad.map((x) => `${basename(x.repo)}: ${x.raw || x.msg}`).join('\n'));
+      },
+    });
+  }
+  resultsModal(`Update from ${name} — results`, results, moved.length ? 'Changed your mind? <b>↶ Undo…</b> at the top puts every updated repo back.' : '');
+}
+
 async function wsNewBranch() {
   const w = currentWs();
   const r = await modal({
@@ -2247,15 +2440,15 @@ async function tidyBranches(repos) {
   if (state.tab === 'branches') loadBranches();
   if (failed.length) showError(`Couldn't delete ${plural(failed.length, 'branch', 'branches')}`, new Error(failed.join('\n')));
   if (deleted.length) {
-    toast(`Deleted ${plural(deleted.length, 'branch', 'branches')}.`, 'ok', {
-      label: 'Undo',
-      fn: async () => {
+    const entry = recordUndo({
+      label: `tidy-up of ${plural(deleted.length, 'branch', 'branches')}`,
+      repos: [...new Set(deleted.map((d) => d.repo))],
+      run: async () => {
         for (const d of deleted) await git('restoreBranch', d.repo, d.name, d.oid).catch(() => {});
         await refreshAll();
-        if (state.tab === 'branches') loadBranches();
-        toast('Branches restored.', 'ok');
       },
     });
+    toast(`Deleted ${plural(deleted.length, 'branch', 'branches')}.`, 'ok', { label: 'Undo', fn: () => runUndo(entry.id) });
   }
 }
 
@@ -2599,10 +2792,11 @@ function paletteCommands() {
     for (const b of state.branches?.local || []) if (!b.current) cmds.push({ label: `Switch to ${b.name}`, hint: `${here} · branch`, run: () => switchBranch(repo, b.name) });
   }
   if (state.view.type === 'workspace') {
-    for (const [label, action] of [['Get latest for all', 'ws-pull'], ['Send all', 'ws-push'], ['New branch in all…', 'ws-new-branch'], ['Switch all to branch…', 'ws-switch'], ['Tidy up branches in all…', 'ws-tidy']]) {
+    for (const [label, action] of [['Get latest for all', 'ws-pull'], ['Send all', 'ws-push'], ['New branch in all…', 'ws-new-branch'], ['Switch all to branch…', 'ws-switch'], ['Update all from a branch…', 'ws-update-from'], ['Tidy up branches in all…', 'ws-tidy']]) {
       cmds.push({ label, hint: currentWs()?.name, run: () => actions[action]({ dataset: {} }) });
     }
   }
+  for (const u of state.undos) cmds.push({ label: `Undo ${u.label}`, hint: `${u.repos.map(basename).join(', ')} · ${timeAgo(u.time / 1000)}`, run: () => runUndo(u.id) });
   cmds.push(
     { label: 'Open repo folder…', hint: 'add', run: () => addRepo(state.view.ws) },
     { label: 'Clone a repo…', hint: 'add', run: () => cloneRepo() },
@@ -3102,6 +3296,9 @@ const actions = {
   },
   'file-history': (t, e) => { e?.stopPropagation(); showFileHistory(t.dataset.path); },
   'update-from': (t) => { closePopover(); updateFrom(t.dataset.repo || currentRepo()); },
+  'ws-update-from': () => wsUpdateFrom(),
+  'undo-list': (t) => (popoverEl ? closePopover() : openUndoList(t)),
+  'undo-run': (t) => runUndo(t.dataset.id),
   compare: (t) => { closePopover(); const repo = t.dataset.repo || currentRepo(); if (!samePath(repo, currentRepo())) openRepo(repo, state.view.ws, 'compare'); else setTab('compare'); },
   'revert-commit': (t) => revertCommit(currentRepo(), t.dataset.hash, t.dataset.subject),
   'cmp-swap': () => { const c = state.cmp; if (c) showCompare(c.head, c.base); },
@@ -3246,7 +3443,7 @@ const actions = {
       state.selStash = null;
       await refreshAll();
       loadShelf();
-      if (dropped?.oid) undoToast('Deleted from the Shelf.', repo, 'delete', async () => { await git('stashStore', repo, dropped.oid, dropped.message || 'Restored'); loadShelf(); });
+      if (dropped?.oid) undoToast('Deleted from the Shelf.', repo, 'delete from the Shelf', async () => { await git('stashStore', repo, dropped.oid, dropped.message || 'Restored'); loadShelf(); });
     } catch (e) { showError("Couldn't delete", e); }
   },
   'open-conflict': (t) => openConflict(t.dataset.path),
@@ -3360,6 +3557,12 @@ document.addEventListener('keydown', (e) => {
   if (e.target.id === 'cp-input' && e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (!cl.running) claudeSend(); return; }
   if (e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === 'j') { e.preventDefault(); toggleClaude(); return; }
   if (e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === 'k') { e.preventDefault(); closePopover(); openPalette(); return; }
+  // Ctrl+Z outside a text box opens the Undo list (it never undoes without a click).
+  if (e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === 'z' && !e.target.closest('input, textarea, select, [contenteditable]') && !$('#modal-root').lastElementChild) {
+    const anchor = $('[data-action=undo-list]');
+    if (anchor) { e.preventDefault(); closePopover(); openUndoList(anchor); }
+    return;
+  }
   // Tab shortcuts, like a browser: Ctrl+W close, Ctrl+Tab / Ctrl+Shift+Tab cycle, Ctrl+1..9 jump.
   if (e.ctrlKey && !e.altKey && e.key.toLowerCase() === 'w') { e.preventDefault(); if (state.activeTab) closeTab(state.activeTab); }
   else if (e.ctrlKey && e.key === 'Tab') { e.preventDefault(); cycleTab(e.shiftKey ? -1 : 1); }

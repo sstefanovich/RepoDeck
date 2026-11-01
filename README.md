@@ -22,7 +22,7 @@ Most git tools assume you already know git and that you work in one repo at a ti
 
 - **Open repo folder** (or drag folders onto the window), or clone one. Group related repos into **workspaces**.
 - The sidebar shows each repo's branch, uncommitted changes (●), commits to send (↑) and commits to get (↓).
-- **Workspace actions** run on every repo at once: check for updates, get latest, send, *New branch in all*, *Switch all to branch*, *Tidy up branches*, *Open all in VS Code*.
+- **Workspace actions** run on every repo at once: check for updates, get latest, send, *New branch in all*, *Switch all to branch*, *Update all from…* (bring `dev` or any branch into every repo, with a per-repo preview of what's coming and one Undo for all of them), *Tidy up branches*, *Open all in VS Code*.
 - If your repos are on different branches, a banner says so and offers **Line them up**.
 - Each repo opens in its own **tab**, and tabs are remembered between launches.
 
@@ -41,7 +41,7 @@ Most git tools assume you already know git and that you work in one repo at a ti
 
 ### Undo
 
-After a commit, merge, get latest, update from another branch, reversed commit, cherry-pick, branch switch, branch delete or Shelf delete, a message with an **Undo** button appears. If something was already sent to the server, RepoDeck says so instead of quietly rewriting it.
+After a commit, merge, get latest, update from another branch, reversed commit, cherry-pick, branch switch, branch delete or Shelf delete, a message with an **Undo** button appears. The action also goes into the **↶ Undo…** list in the repo header and on the workspace page (or press <kbd>Ctrl</kbd>+<kbd>Z</kbd>), so you can still undo it after the message has gone. Before undoing, RepoDeck checks that nothing has happened since (new commits, a branch switch) that undoing would throw away. If something was already sent to the server, it says so instead of quietly rewriting it.
 
 ![“Committed to feature/login.” with an Undo button](docs/screenshots/undo.png)
 
