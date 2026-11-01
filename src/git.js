@@ -5,7 +5,7 @@ const { execFile } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { partialPatch } = require('../renderer/lib');
+const { partialPatch, changedLines } = require('../renderer/lib');
 
 const ENV = {
   ...process.env,
@@ -629,10 +629,32 @@ const ops = {
     });
   },
 
-  async stashSave(repo, message) {
+  // paths: only shelve these files (all changes when omitted).
+  async stashSave(repo, message, paths = null) {
     const args = ['stash', 'push', '--include-untracked'];
     if (message) args.push('-m', message);
+    if (paths?.length) {
+      await must(repo, [...args, '--pathspec-from-file=-', '--pathspec-file-nul'], { input: paths.map(lit).join('\0') });
+      return true;
+    }
     await must(repo, args);
+    return true;
+  },
+
+  // Throws away some changed lines of a file (keys from lineKeyer) and returns the patch that
+  // puts them back, for Undo.
+  async discardLines(repo, file, keys) {
+    const d = await must(repo, ['diff', 'HEAD', '--', lit(file)], { quiet: true });
+    const keep = new Set(keys);
+    const others = changedLines(d.stdout).map((x) => x.key).filter((k) => !keep.has(k));
+    const patch = partialPatch(d.stdout, others);
+    if (!patch) throw new GitError('Those lines have already changed. Look at the file again and retry.');
+    await must(repo, ['apply', '-R', '--whitespace=nowarn', '-'], { input: patch });
+    return { patch };
+  },
+
+  async applyPatch(repo, patch) {
+    await must(repo, ['apply', '--whitespace=nowarn', '-'], { input: patch });
     return true;
   },
 
@@ -897,7 +919,11 @@ const plans = {
     ];
   },
   undoLastCommit: () => [step(['reset', '--soft', 'HEAD~1'], 'Remove the last commit but keep all its changes in your folder, ready to commit again.')],
-  stashSave: (repo, message) => [step(['stash', 'push', '--include-untracked', ...(message ? ['-m', message] : [])], 'Put all uncommitted changes (including new files) on the Shelf and make your folder match your last commit.')],
+  stashSave: (repo, message, paths = null) => [paths?.length
+    ? step(['stash', 'push', '--include-untracked', ...(message ? ['-m', message] : []), '--', ...paths], 'Put the changes to these files on the Shelf and put the files back to your last commit. Other changes stay where they are.')
+    : step(['stash', 'push', '--include-untracked', ...(message ? ['-m', message] : [])], 'Put all uncommitted changes (including new files) on the Shelf and make your folder match your last commit.')],
+  discardLines: (repo, file, keys) => [step(['apply', '-R', '-'], `Throw away ${keys.length === 1 ? 'this changed line' : `these ${keys.length} changed lines`} in ${file}, putting them back to your last commit. Undo puts them back.`)],
+  applyPatch: () => [step(['apply', '-'], 'Put the thrown-away lines back.')],
   stashApply: (repo, ref) => [step(['stash', 'apply', ref], 'Copy the changes from this Shelf item into your folder, keeping the item on the Shelf.')],
   stashPop: (repo, ref) => [step(['stash', 'pop', ref], 'Put the changes from this Shelf item back into your folder and remove it from the Shelf (kept if there are conflicts).')],
   stashDrop: (repo, ref) => [step(['stash', 'drop', ref], 'Delete this item from the Shelf for good.')],

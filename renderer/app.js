@@ -12,7 +12,7 @@ const MUTATING = new Set([
   'commit', 'discard', 'ignore', 'fetch', 'pull', 'push', 'addRemote', 'createBranch', 'switchBranch', 'checkoutRemote',
   'renameBranch', 'deleteBranch', 'merge', 'undoLastCommit', 'stashSave', 'stashApply', 'stashPop', 'stashDrop',
   'resolveSide', 'saveResolution', 'markResolved', 'abortOp', 'continueOp', 'skipOp', 'cherryPick', 'cherryPickOnto',
-  'clone', 'init', 'setIdentity', 'resetTo', 'restoreBranch', 'stashStore', 'updateFrom', 'revertCommit', 'finishBranch',
+  'clone', 'init', 'setIdentity', 'resetTo', 'restoreBranch', 'stashStore', 'updateFrom', 'revertCommit', 'finishBranch', 'discardLines', 'applyPatch',
 ]);
 let previewSuppressed = 0;
 const CANCELLED = 'CANCELLED';
@@ -907,7 +907,9 @@ function renderFileList() {
   $('#changes-head').innerHTML = files.length ? `
     <label class="check" title="Tick or untick everything"><input type="checkbox" data-action="check-all" ${n === files.length ? 'checked' : ''}> <span>${plural(files.length, 'changed file')}</span></label>
     <div class="spacer"></div>
-    <button class="btn small ghost" data-action="shelve" data-repo="${esc(repo)}" title="git stash — set all your changes aside so your folder is clean">Put all on Shelf</button>
+    ${n && n < files.length
+      ? `<button class="btn small ghost" data-action="shelve-ticked" title="git stash push -- <files> — set the ticked files' changes aside">Put ticked on Shelf</button>`
+      : `<button class="btn small ghost" data-action="shelve" data-repo="${esc(repo)}" title="git stash — set all your changes aside so your folder is clean">Put all on Shelf</button>`}
     <button class="btn small ghost danger-text" data-action="discard-checked" ${n ? '' : 'disabled'}>Discard ticked…</button>` : '';
   const all = $('[data-action=check-all]');
   if (all) all.indeterminate = n > 0 && n < files.length;
@@ -1059,6 +1061,21 @@ function syncPickBoxes() {
   }
 }
 
+// Throws away one block of changes in the file shown in the diff.
+async function discardBlock(h) {
+  const k = state.diffKeys;
+  if (!k) return;
+  const keys = [...document.querySelectorAll(`#diff-pane .dl[data-h="${h}"] [data-action=pick-line]`)].map((b) => b.dataset.key);
+  if (!keys.length) return;
+  const ok = await confirmBox('Discard this block?', `<p>Throw away ${plural(keys.length, 'changed line')} in <code>${esc(k.path)}</code>, putting ${keys.length === 1 ? 'it' : 'them'} back to your last commit? The rest of the file is left alone.</p>
+    <p class="hint">Changed your mind? <b>Undo</b> puts them back.</p>`, 'Discard block', true);
+  if (!ok) return;
+  try {
+    const { patch } = await busy(k.repo, 'Discarding…', () => git('discardLines', k.repo, k.path, keys));
+    undoToast('Block discarded.', k.repo, `discard of a block in ${basename(k.path)}`, () => git('applyPatch', k.repo, patch));
+  } catch (e) { showError("Couldn't discard", e); }
+}
+
 // After ticking lines: update the file list and commit button to match.
 function afterPick() {
   syncPickBoxes();
@@ -1109,7 +1126,8 @@ function renderDiff(text, { maxLines = 6000, file = '', picked = null } = {}) {
       hunkNo++;
       if (picking) for (const r of h.rows) if (r.kind !== 'ctx') r.key = key(r.kind, r.text);
       const hunkBox = picking ? `<span class="lp"><input type="checkbox" data-action="pick-hunk" data-h="${hunkNo}" title="Tick or untick this whole block" aria-label="Include this block in the commit"></span>` : '';
-      out.push(split ? `<div class="sr gap hunk-gap">${esc(h.ctx) || '⋯'}</div>` : `<div class="dl hunk">${hunkBox}${ln('⋯')}${ln('⋯')}<span class="code">${esc(h.ctx)}</span></div>`);
+      const discard = picking ? `<button class="btn small ghost hunk-discard" data-action="discard-hunk" data-h="${hunkNo}" title="Throw away the changes in this block (Undo puts them back)">↺ Discard block</button>` : '';
+      out.push(split ? `<div class="sr gap hunk-gap">${esc(h.ctx) || '⋯'}</div>` : `<div class="dl hunk">${hunkBox}${ln('⋯')}${ln('⋯')}<span class="code">${esc(h.ctx)}</span>${discard}</div>`);
       for (const g of pairHunk(h.rows)) {
         if (++count > maxLines) { out.push('<div class="dnote">… the rest is too long to show here. Open the file in your editor.</div>'); break; }
         if (g.kind === 'ctx') {
@@ -2069,15 +2087,17 @@ async function loadStashPreview() {
     <div class="diff-scroll">${renderDiff(diff)}</div>`;
 }
 
-async function shelve(repo) {
-  const name = await ask('Put changes on the Shelf', {
+// paths: only these files (whole files); all changes when omitted.
+async function shelve(repo, paths = null) {
+  const name = await ask(paths ? `Put ${plural(paths.length, 'file')} on the Shelf` : 'Put changes on the Shelf', {
     label: 'Name (optional) — so you remember what this was',
     placeholder: 'e.g. half-done refactor of login',
-    help: 'All your uncommitted changes (including new files) will be set aside and your folder will match your last commit.',
+    help: paths ? 'The changes to the ticked files are set aside and those files go back to your last commit. Your other changes stay where they are.'
+      : 'All your uncommitted changes (including new files) will be set aside and your folder will match your last commit.',
     okLabel: 'Put on Shelf',
   });
   if (name === null) return;
-  try { await busy(repo, 'Shelving…', () => git('stashSave', repo, name)); toast('Changes are on the Shelf.', 'ok'); if (state.tab === 'shelf') loadShelf(); }
+  try { await busy(repo, 'Shelving…', () => git('stashSave', repo, name, paths)); toast('Changes are on the Shelf.', 'ok'); if (state.tab === 'shelf') loadShelf(); }
   catch (e) { showError("Couldn't shelve", e); }
 }
 
@@ -3388,6 +3408,12 @@ const actions = {
   'ws-update-from': () => wsUpdateFrom(),
   'finish-branch': (t) => { closePopover(); finishBranch(t.dataset.repo || currentRepo()); },
   'ws-finish': () => wsFinish(),
+  'discard-hunk': (t) => discardBlock(t.dataset.h),
+  'shelve-ticked': () => {
+    const repo = currentRepo();
+    const ticked = changedFiles(state.status[repo]).filter((f) => state.checked[repo]?.[f.path]);
+    shelve(repo, ticked.flatMap((f) => (f.orig ? [f.path, f.orig] : [f.path])));
+  },
   'undo-list': (t) => (popoverEl ? closePopover() : openUndoList(t)),
   'undo-run': (t) => runUndo(t.dataset.id),
   compare: (t) => { closePopover(); const repo = t.dataset.repo || currentRepo(); if (!samePath(repo, currentRepo())) openRepo(repo, state.view.ws, 'compare'); else setTab('compare'); },

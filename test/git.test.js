@@ -403,6 +403,33 @@ test('finish a branch after its pull request: merged, and squashed', async () =>
   await assert.rejects(ops.finishBranch(a), /uncommitted changes/);
 });
 
+test('discard one block of a file (and put it back), and shelve only some files', async () => {
+  const { changedLines } = require('../renderer/lib');
+  const a = sb.repo('discard-block');
+  const lines = Array.from({ length: 20 }, (_, i) => `l${i + 1}`);
+  sb.write(a, 'f.txt', lines.join('\n') + '\n');
+  sb.write(a, 'g.txt', 'g\n');
+  await ops.commit(a, { message: 'base', paths: [], all: true });
+  const edited = [...lines];
+  edited[1] = 'DEBUG';
+  edited[17] = 'KEEP ME';
+  sb.write(a, 'f.txt', edited.join('\n') + '\n');
+  const text = () => fs.readFileSync(path.join(a, 'f.txt'), 'utf8').replace(/\r\n/g, '\n');
+  const debug = changedLines((await ops.fileDiff(a, ['f.txt'])).text).filter((x) => /l2$|DEBUG/.test(x.text)).map((x) => x.key);
+  const { patch } = await ops.discardLines(a, 'f.txt', debug);
+  assert.match(text(), /^l2$/m, 'the debug block is gone');
+  assert.match(text(), /^KEEP ME$/m, 'the other block is untouched');
+  await ops.applyPatch(a, patch);
+  assert.match(text(), /^DEBUG$/m, 'undo puts it back');
+
+  sb.write(a, 'g.txt', 'g changed\n');
+  sb.write(a, 'new.txt', 'new\n');
+  await ops.stashSave(a, 'just g and new', ['g.txt', 'new.txt']);
+  const st = await ops.status(a);
+  assert.deepEqual([...st.unstaged.map((f) => f.path), ...st.untracked.map((f) => f.path)], ['f.txt'], 'f.txt stays; g.txt and new.txt are shelved');
+  assert.equal((await ops.stashList(a))[0].message, 'just g and new');
+});
+
 test('compare two branches', async () => {
   const a = sb.repo('compare');
   sb.write(a, 'keep.txt', 'k\n');

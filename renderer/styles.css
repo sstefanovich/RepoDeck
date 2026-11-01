@@ -628,3 +628,4 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; border: 2px solid transparent; background-clip: padding-box; }
 ::-webkit-scrollbar-thumb:hover { background-color: var(--muted); }
+.dl.hunk .hunk-discard { flex-shrink: 0; margin: 1px 8px; padding: 0 8px; font: 12px "Segoe UI", system-ui, sans-serif; }
