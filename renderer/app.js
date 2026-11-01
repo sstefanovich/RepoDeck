@@ -113,6 +113,8 @@ const state = {
   prStatus: {},       // norm(repo) -> pull request info from Azure DevOps, for the current branch
   adoToken: false,    // an Azure DevOps token is saved (the token itself stays in the main process)
   workItem: {},       // "repo|branch" -> work item number typed in the commit box
+  wsQuery: '',        // workspace page: search text
+  branchFilter: '',   // Branches tab: filter text
   histFile: null,     // History: only commits touching this file
   histQuery: '',      // History: search text
 };
@@ -609,10 +611,60 @@ function openWorkspace(id) {
       <button class="btn" data-action="ws-open-editor">Open all in ${esc(editorName())}</button>
       <button class="btn ghost" data-action="add-repo" data-ws="${w.id}">＋ Add repo</button>
     </div>
+    <div class="ws-search-row">
+      <input class="filter ws-search" id="ws-search" placeholder="Find a commit or branch in every repo — message, author, hash or branch name" spellcheck="false" aria-label="Search every repo" value="${esc(state.wsQuery || '')}">
+    </div>
+    <div id="ws-results"></div>
     <div id="ws-align"></div>
     <div id="ws-cards" class="cards"></div>
   </div>`;
   renderWorkspaceCards();
+  let timer = 0;
+  $('#ws-search').addEventListener('input', (e) => {
+    state.wsQuery = e.target.value;
+    clearTimeout(timer);
+    timer = setTimeout(() => searchWorkspace(id), 300);
+  });
+  if (state.wsQuery) searchWorkspace(id);
+}
+
+// Searches every repo of the workspace at once; results are grouped by repo.
+async function searchWorkspace(wsId) {
+  const el = $('#ws-results');
+  const w = currentWs();
+  const q = (state.wsQuery || '').trim();
+  if (!el || !w) return;
+  if (q.length < 2) { el.innerHTML = ''; return; }
+  el.innerHTML = '<div class="ws-results"><span class="spinner sm"></span> Searching…</div>';
+  const repos = w.repos.filter((p) => !state.status[p]?.error && !state.status[p]?.missing);
+  const found = await Promise.all(repos.map(async (repo) => ({ repo, ...(await gitRaw('search', repo, q).catch(() => ({ branches: [], commits: [] }))) })));
+  if ((state.wsQuery || '').trim() !== q || state.view.ws !== wsId || !$('#ws-results')) return;
+  const hits = found.filter((f) => f.branches.length || f.commits.length);
+  const n = hits.reduce((s, f) => s + f.branches.length + f.commits.length, 0);
+  el.innerHTML = `<div class="ws-results">
+    <div class="ws-results-head"><b>${n ? `${plural(n, 'match', 'matches')} in ${plural(hits.length, 'repo')}` : `Nothing matches “${esc(q)}” in any repo.`}</b>
+      <button class="btn small ghost" data-action="ws-search-clear">Clear</button></div>
+    ${hits.map((f) => `<div class="ws-hit-repo"><h3>${esc(basename(f.repo))}</h3>
+      ${f.branches.map((b) => `<button class="ws-hit" data-action="ws-hit-branch" data-repo="${esc(f.repo)}" data-name="${esc(b.name)}">
+        <span>⎇ <b>${esc(b.name)}</b></span><span class="muted small">${b.remote ? 'branch on the server' : 'branch'}</span></button>`).join('')}
+      ${f.commits.map((c) => `<button class="ws-hit" data-action="ws-hit-commit" data-repo="${esc(f.repo)}" data-hash="${c.hash}" data-on="${esc(c.on || '')}">
+        <span><span class="mono">${c.short}</span> ${esc(c.subject)}</span>
+        <span class="muted small">${esc(c.author)} · ${timeAgo(c.date)}${c.on ? ` · on ${esc(c.on)}` : ''}</span></button>`).join('')}
+    </div>`).join('')}
+  </div>`;
+}
+
+// Opens a search result: the commit in the History of the branch it's on.
+function openCommitIn(repo, hash, on) {
+  openRepo(repo, state.view.ws);
+  const cur = state.status[repo]?.branch;
+  state.histRef = on && on !== cur ? on : null;
+  state.histNotIn = false;
+  state.histFile = null;
+  state.histQuery = '';
+  state.selCommit = hash;
+  state.history = null;
+  setTab('history');
 }
 
 // The classic multi-repo mistake: building api on feature/x against web on main. Point it out.
@@ -699,6 +751,7 @@ function openRepo(repo, wsId, tab) {
     state.selCommit = state.selStash = state.conflict = null;
     state.histRef = null;
     state.cmp = null;
+    state.branchFilter = state.branchFilter && tab === 'branches' ? state.branchFilter : '';
     state.blame = false;
     state.picks.clear();
     state.headKey = `${st.branch}|${st.oid}`;
@@ -1380,10 +1433,15 @@ function renderBranchesTab() {
         <button class="btn small ghost danger-text" data-action="delete-tag" data-name="${esc(t.name)}">Delete…</button>
       </div></div>`).join('') || '<div class="muted pad">No tags yet.</div>'}</div>
   </div>`;
-  $('#branch-filter').addEventListener('input', (e) => {
-    const q = e.target.value.toLowerCase();
+  const filter = $('#branch-filter');
+  const apply = () => {
+    const q = filter.value.toLowerCase();
+    state.branchFilter = filter.value;
     body.querySelectorAll('.row[data-name]').forEach((r) => { r.style.display = r.dataset.name.toLowerCase().includes(q) ? '' : 'none'; });
-  });
+  };
+  filter.value = state.branchFilter || '';
+  filter.addEventListener('input', apply);
+  if (filter.value) apply();
 }
 
 const branchTransform = (v) => v.replace(/\s+/g, '-');
@@ -3638,6 +3696,9 @@ const actions = {
   'discard-hunk': (t) => discardBlock(t.dataset.h),
   'tidy-commits': () => tidyCommits(currentRepo()),
   'open-pr-web': (t) => api.openUrl(t.dataset.url),
+  'ws-search-clear': () => { state.wsQuery = ''; $('#ws-search').value = ''; $('#ws-results').innerHTML = ''; },
+  'ws-hit-commit': (t) => openCommitIn(t.dataset.repo, t.dataset.hash, t.dataset.on),
+  'ws-hit-branch': (t) => { state.branchFilter = t.dataset.name; openRepo(t.dataset.repo, state.view.ws, 'branches'); },
   'add-tag': (t) => addTag(currentRepo(), t.dataset.hash),
   'delete-tag': (t) => deleteTag(currentRepo(), t.dataset.name),
   'push-tag': async (t) => { const repo = currentRepo(); try { await busy(repo, 'Sending tag…', () => git('pushTag', repo, t.dataset.name)); toast(`Sent ${t.dataset.name} to the server.`, 'ok'); } catch (e) { showError("Couldn't send the tag", e); } },

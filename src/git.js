@@ -652,6 +652,36 @@ const ops = {
     return { commits, unpushed, incoming, upstream: up.ok ? up.stdout.trim() : null };
   },
 
+  // Branches whose name contains `query`, and commits (on any branch) whose message or author
+  // contains it, or whose hash starts with it. Each commit says which branch it's on.
+  async search(repo, query, { limit = 25 } = {}) {
+    const q = String(query || '').trim();
+    if (q.length < 2) return { branches: [], commits: [] };
+    const refs = (await run(repo, ['for-each-ref', '--format=%(refname)', 'refs/heads', 'refs/remotes'], { quiet: true })).stdout.split('\n').filter(Boolean);
+    const lower = q.toLowerCase();
+    const branches = refs.filter((r) => !r.endsWith('/HEAD')).map((r) => ({ name: r.replace(/^refs\/(heads|remotes)\//, ''), remote: r.startsWith('refs/remotes/') }))
+      .filter((b) => b.name.toLowerCase().includes(lower)).slice(0, 20);
+    const fmt = '%H%x1f%h%x1f%an%x1f%at%x1f%s%x1e';
+    const parse = (out) => out.split('\x1e').map((s) => s.trim()).filter(Boolean).map((rec) => {
+      const [hash, short, author, date, subject] = rec.split('\x1f');
+      return { hash, short, author, date: +date, subject };
+    });
+    const log = (...filter) => run(repo, ['log', '--all', `-n${limit}`, '-i', '--fixed-strings', `--format=${fmt}`, ...filter], { quiet: true }).then((r) => parse(r.stdout));
+    const found = [...(await log(`--grep=${q}`)), ...(await log(`--author=${q}`))];
+    if (/^[0-9a-f]{4,40}$/i.test(q)) {
+      const h = await run(repo, ['log', '-1', `--format=${fmt}`, `${q}^{commit}`], { quiet: true });
+      if (h.ok) found.unshift(...parse(h.stdout));
+    }
+    const seen = new Set();
+    const commits = found.filter((c) => !seen.has(c.hash) && seen.add(c.hash)).sort((a, b) => b.date - a.date).slice(0, limit);
+    if (commits.length) {
+      // "main~3" or "remotes/origin/dev~2^2" -> the branch the commit is on.
+      const names = (await run(repo, ['name-rev', '--name-only', '--refs=refs/heads/*', '--refs=refs/remotes/*', ...commits.map((c) => c.hash)], { quiet: true })).stdout.split('\n');
+      commits.forEach((c, i) => { const n = (names[i] || '').trim().replace(/[~^].*$/, '').replace(/^remotes\//, ''); c.on = n && n !== 'undefined' ? n : null; });
+    }
+    return { branches, commits };
+  },
+
   // ---------- tags ----------
   async tags(repo) {
     const fmt = ['%(refname:short)', '%(objectname)', '%(objecttype)', '%(*objectname)', '%(creatordate:unix)', '%(contents:subject)'].join('%1f');

@@ -511,6 +511,25 @@ test('tags: create, send, delete and put back', async () => {
   assert.ok(back.annotated && back.message === 'First release', 'undo keeps the annotation');
 });
 
+test('search: commits by message, author and hash, and branches by name', async () => {
+  const a = sb.repo('search');
+  sb.write(a, 'a.txt', 'a\n');
+  await ops.commit(a, { message: 'Set up the project', paths: [], all: true });
+  await ops.createBranch(a, 'feature/checkout', null);
+  sb.write(a, 'c.txt', 'c\n');
+  sb.sh(a, '-c', 'user.name=Dana Coder', 'commit', '-q', '--allow-empty', '-m', 'Fix the Checkout total (rounding)');
+  const fix = await ops.headOid(a);
+  await ops.switchBranch(a, 'main');
+  const byMessage = await ops.search(a, 'checkout total');
+  assert.deepEqual(byMessage.commits.map((c) => c.subject), ['Fix the Checkout total (rounding)'], 'case-insensitive, any branch');
+  assert.equal(byMessage.commits[0].on, 'feature/checkout', 'says which branch it is on');
+  assert.equal((await ops.search(a, '(rounding)')).commits.length, 1, 'brackets are matched literally');
+  assert.equal((await ops.search(a, 'dana')).commits[0].hash, fix, 'by author');
+  assert.equal((await ops.search(a, fix.slice(0, 8))).commits[0].hash, fix, 'by hash');
+  assert.deepEqual((await ops.search(a, 'CHECK')).branches.map((b) => b.name), ['feature/checkout']);
+  assert.deepEqual(await ops.search(a, 'x'), { branches: [], commits: [] }, 'too short');
+});
+
 test('compare two branches', async () => {
   const a = sb.repo('compare');
   sb.write(a, 'keep.txt', 'k\n');
