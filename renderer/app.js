@@ -12,7 +12,7 @@ const MUTATING = new Set([
   'commit', 'discard', 'ignore', 'fetch', 'pull', 'push', 'addRemote', 'createBranch', 'switchBranch', 'checkoutRemote',
   'renameBranch', 'deleteBranch', 'merge', 'undoLastCommit', 'stashSave', 'stashApply', 'stashPop', 'stashDrop',
   'resolveSide', 'saveResolution', 'markResolved', 'abortOp', 'continueOp', 'skipOp', 'cherryPick', 'cherryPickOnto',
-  'clone', 'init', 'setIdentity', 'resetTo', 'restoreBranch', 'stashStore', 'updateFrom', 'revertCommit', 'finishBranch', 'discardLines', 'applyPatch', 'tidyCommits',
+  'clone', 'init', 'setIdentity', 'resetTo', 'restoreBranch', 'stashStore', 'updateFrom', 'revertCommit', 'finishBranch', 'discardLines', 'applyPatch', 'tidyCommits', 'createTag', 'pushTag', 'deleteTag', 'restoreTag',
 ]);
 let previewSuppressed = 0;
 const CANCELLED = 'CANCELLED';
@@ -91,6 +91,7 @@ const state = {
   lastFetch: {},     // repo -> ms timestamp
   headKey: null,
   branches: null,
+  tags: null,        // tags of the open repo (Branches tab)
   history: null,
   stashes: null,
   selCommit: null,
@@ -693,7 +694,7 @@ function openRepo(repo, wsId, tab) {
   state.view = { type: 'repo', path: repo, ws: wsId };
   ensureTab({ type: 'repo', path: repo, ws: wsId });
   if (switching) {
-    state.branches = state.history = state.stashes = null;
+    state.branches = state.tags = state.history = state.stashes = null;
     state.selCommit = state.selStash = state.conflict = null;
     state.histRef = null;
     state.cmp = null;
@@ -1308,7 +1309,7 @@ async function afterMaybeConflict(repo, r, successMsg) {
 // ---------- branches ----------
 async function loadBranches() {
   const repo = currentRepo();
-  try { state.branches = await git('branches', repo); }
+  try { [state.branches, state.tags] = await Promise.all([git('branches', repo), gitRaw('tags', repo).catch(() => [])]); }
   catch (e) { state.branches = { error: e.message }; }
   if (state.tab === 'branches' && samePath(currentRepo(), repo)) renderBranchesTab();
 }
@@ -1363,6 +1364,15 @@ function renderBranchesTab() {
     <h3>On the server only <span class="muted small">(${b.remoteOnly.length})</span></h3>
     <p class="hint">These exist on the server but you haven't got them as a branch here. “Switch to” downloads one. Click <b>Check for updates</b> to refresh this list.</p>
     <div class="rows">${remote || '<div class="muted pad">None.</div>'}</div>
+    <h3>Tags <span class="muted small">(${(state.tags || []).length})</span></h3>
+    <p class="hint">A <b>tag</b> is a permanent label on one commit, usually a release like v1.2.0. Add one from a commit in History.</p>
+    <div class="rows">${(state.tags || []).map((t) => `<div class="row" data-name="${esc(t.name)}">
+      <div class="row-main"><div class="row-title">🏷 ${esc(t.name)}</div>
+        <div class="row-sub"><span class="mono">${t.commit.slice(0, 7)}</span>${t.message ? ` · ${esc(t.message)}` : ''}${t.date ? ` · ${timeAgo(t.date)}` : ''}</div></div>
+      <div class="row-actions">
+        ${st.hasRemote ? `<button class="btn small ghost" data-action="push-tag" data-name="${esc(t.name)}" title="git push origin ${esc(t.name)}">↑ Send</button>` : ''}
+        <button class="btn small ghost danger-text" data-action="delete-tag" data-name="${esc(t.name)}">Delete…</button>
+      </div></div>`).join('') || '<div class="muted pad">No tags yet.</div>'}</div>
   </div>`;
   $('#branch-filter').addEventListener('input', (e) => {
     const q = e.target.value.toLowerCase();
@@ -1935,11 +1945,55 @@ async function loadCommitDetails() {
         <button class="btn small ghost" data-action="explain-commit" data-hash="${d.hash}" data-subject="${esc(subject)}" title="Ask Claude to explain this commit">✦ Explain</button>
         ${state.histRef ? `<button class="btn small primary" data-action="cherry-pick-one" data-hash="${d.hash}" title="git cherry-pick">🍒 Cherry-pick into ${esc(cur)}</button>` : ''}
         <button class="btn small" data-action="cherry-pick-to-one" data-hash="${d.hash}">Copy to another branch…</button>
+        <button class="btn small ghost" data-action="add-tag" data-hash="${d.hash}" title="git tag — put a permanent label (like v1.2.0) on this commit">🏷 Add tag…</button>
         ${!state.histRef && !canUndo ? `<button class="btn small" data-action="revert-commit" data-hash="${d.hash}" data-subject="${esc(subject)}" title="git revert — a new commit that does the opposite">↺ Reverse this commit…</button>` : ''}
         ${canUndo ?`<button class="btn small" data-action="undo-commit" title="git reset --soft HEAD~1">↶ Undo this commit</button><span class="hint">Undo keeps your changes (they go back to the Changes tab). Possible because it hasn't been sent yet.</span>` : ''}
       </div>` : ''}
     </div>
     <div class="diff-scroll">${renderDiff(d.diff)}</div>`;
+}
+
+// ---------- tags ----------
+async function addTag(repo, hash) {
+  const st = state.status[repo] || {};
+  const r = await modal({
+    title: 'Add a tag',
+    body: `<label class="field"><span>Tag name</span><input name="name" placeholder="e.g. v1.2.0" spellcheck="false"></label>
+      <label class="field"><span>Message (optional — makes a release-style tag with your name and the date)</span><textarea name="message" rows="2" placeholder="e.g. First public release"></textarea></label>
+      ${st.hasRemote ? '<label class="check"><input type="checkbox" name="send" checked> Send it to the server straight away</label>' : ''}
+      <p class="hint">On commit <span class="mono">${hash.slice(0, 7)}</span>.</p>`,
+    buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'ok', label: '🏷 Add tag', kind: 'primary' }],
+    init: (el) => { const i = el.querySelector('[name=name]'); i.addEventListener('input', () => { i.value = i.value.replace(/\s+/g, '-'); }); },
+  });
+  const name = r.values.name?.trim();
+  if (r.id !== 'ok' || !name) return;
+  if (!(await gitRaw('checkTagName', name))) { showError('Invalid tag name', new Error(`'${name}' is not a valid tag name. Use letters, numbers, dots and dashes, e.g. v1.2.0.`)); return; }
+  try {
+    await busy(repo, 'Tagging…', () => git('createTag', repo, name, hash, r.values.message.trim()));
+    if (r.values.send) await busy(repo, 'Sending tag…', () => git('pushTag', repo, name));
+    toast(`Tagged ${hash.slice(0, 7)} as ${name}${r.values.send ? ' and sent it to the server' : ''}.`, 'ok');
+    if (state.tab === 'history') loadHistory();
+  } catch (e) { showError("Couldn't add the tag", e); }
+}
+
+async function deleteTag(repo, name) {
+  const st = state.status[repo] || {};
+  const r = await modal({
+    title: `Delete the tag ${name}?`,
+    body: `<p>The commit itself isn't touched — only the label is removed.</p>
+      ${st.hasRemote ? '<label class="check"><input type="checkbox" name="remote"> Also delete it on the server</label>' : ''}`,
+    buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'ok', label: 'Delete', kind: 'danger' }],
+  });
+  if (r.id !== 'ok') return;
+  try {
+    const { oid } = await git('deleteTag', repo, name, { remote: !!r.values.remote });
+    undoToast(`Deleted the tag ${name}${r.values.remote ? ' (here and on the server)' : ''}.`, repo, `delete of the tag ${name}`, async () => {
+      await git('restoreTag', repo, name, oid);
+      if (r.values.remote) await git('pushTag', repo, name);
+      loadBranches();
+    });
+    loadBranches();
+  } catch (e) { showError("Couldn't delete the tag", e); }
 }
 
 // Combine, reword or drop commits that haven't been sent yet.
@@ -3524,6 +3578,9 @@ const actions = {
   'ws-finish': () => wsFinish(),
   'discard-hunk': (t) => discardBlock(t.dataset.h),
   'tidy-commits': () => tidyCommits(currentRepo()),
+  'add-tag': (t) => addTag(currentRepo(), t.dataset.hash),
+  'delete-tag': (t) => deleteTag(currentRepo(), t.dataset.name),
+  'push-tag': async (t) => { const repo = currentRepo(); try { await busy(repo, 'Sending tag…', () => git('pushTag', repo, t.dataset.name)); toast(`Sent ${t.dataset.name} to the server.`, 'ok'); } catch (e) { showError("Couldn't send the tag", e); } },
   'shelve-ticked': () => {
     const repo = currentRepo();
     const ticked = changedFiles(state.status[repo]).filter((f) => state.checked[repo]?.[f.path]);

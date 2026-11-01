@@ -647,6 +647,45 @@ const ops = {
     return { commits, unpushed, incoming, upstream: up.ok ? up.stdout.trim() : null };
   },
 
+  // ---------- tags ----------
+  async tags(repo) {
+    const fmt = ['%(refname:short)', '%(objectname)', '%(objecttype)', '%(*objectname)', '%(creatordate:unix)', '%(contents:subject)'].join('%1f');
+    const r = await must(repo, ['for-each-ref', '--sort=-creatordate', `--format=${fmt}`, 'refs/tags'], { quiet: true });
+    return r.stdout.split('\n').filter(Boolean).map((line) => {
+      const [name, oid, type, target, date, subject] = line.split('\x1f');
+      const annotated = type === 'tag';
+      return { name, commit: annotated ? target : oid, annotated, date: +date, message: annotated ? subject : '' };
+    });
+  },
+
+  async checkTagName(name) {
+    return (await run(os.homedir(), ['check-ref-format', `refs/tags/${name}`], { quiet: true })).ok && !/\s/.test(name);
+  },
+
+  // A message makes an annotated tag (with author and date), which is what releases usually want.
+  async createTag(repo, name, hash, message = '') {
+    await must(repo, message ? ['tag', '-a', name, '-m', message, hash] : ['tag', name, hash]);
+    return true;
+  },
+
+  async pushTag(repo, name) {
+    await must(repo, ['push', await firstRemote(repo), `refs/tags/${name}`]);
+    return true;
+  },
+
+  // Returns what the tag pointed at, so Undo can put it back exactly (annotation included).
+  async deleteTag(repo, name, { remote = false } = {}) {
+    const oid = (await must(repo, ['rev-parse', '--verify', `refs/tags/${name}`], { quiet: true })).stdout.trim();
+    await must(repo, ['tag', '-d', name]);
+    if (remote) await must(repo, ['push', await firstRemote(repo), '--delete', `refs/tags/${name}`]);
+    return { oid };
+  },
+
+  async restoreTag(repo, name, oid) {
+    await must(repo, ['update-ref', `refs/tags/${name}`, oid]);
+    return true;
+  },
+
   // Who last changed each line of `file` (as it is on disk now; uncommitted lines have an all-zero hash).
   // -> { lines: [{ hash, n, text }], commits: { hash: { author, time, summary } }, truncated }
   async blame(repo, file) {
@@ -899,6 +938,12 @@ function tidyTodo(steps) {
   return { todo, files };
 }
 
+async function firstRemote(repo) {
+  const remotes = (await run(repo, ['remote'], { quiet: true })).stdout.split(/\r?\n/).filter(Boolean);
+  if (!remotes.length) throw new GitError('This repo has no server (remote) configured.', 'NO_REMOTE');
+  return remotes.includes('origin') ? 'origin' : remotes[0];
+}
+
 // One patch per partly-ticked file, made from a fresh diff so it matches the files on disk.
 async function partialPatches(repo, partial) {
   const patches = [];
@@ -998,6 +1043,14 @@ const plans = {
       ...(deleteRemote && slash > 0 && !st.upstreamGone ? [step(['push', st.upstream.slice(0, slash), '--delete', st.upstream.slice(slash + 1)], 'Also delete it on the server.')] : []),
     ];
   },
+  createTag: (repo, name, hash, message = '') => [step(message ? ['tag', '-a', name, '-m', firstLine(message), hash.slice(0, 10)] : ['tag', name, hash.slice(0, 10)],
+    `Put the label ${name} on that commit${message ? ', with your message, author and date' : ''}. It stays on your computer until you send it.`)],
+  pushTag: (repo, name) => [step(['push', 'origin', `refs/tags/${name}`], `Send the tag ${name} to the server.`)],
+  deleteTag: (repo, name, { remote = false } = {}) => [
+    step(['tag', '-d', name], `Remove the tag ${name} from your computer. Undo can put it back.`),
+    ...(remote ? [step(['push', 'origin', '--delete', `refs/tags/${name}`], 'Also remove it from the server.')] : []),
+  ],
+  restoreTag: (repo, name, oid) => [step(['update-ref', `refs/tags/${name}`, oid.slice(0, 10)], `Put the tag ${name} back, exactly as it was.`)],
   tidyCommits: (repo, steps) => {
     const { todo } = tidyTodo(steps);
     const words = { pick: 'keep', fixup: 'combine into the one above', drop: 'drop' };

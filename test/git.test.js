@@ -482,6 +482,35 @@ test('blame: who changed each line', async () => {
   assert.deepEqual(b.lines.map((l) => l.n), [1, 2, 3, 4]);
 });
 
+test('tags: create, send, delete and put back', async () => {
+  const srv = sb.server('tags');
+  const a = sb.repo('tags');
+  sb.write(a, 'a.txt', 'a\n');
+  await ops.commit(a, { message: 'first', paths: [], all: true });
+  const first = await ops.headOid(a);
+  sb.write(a, 'b.txt', 'b\n');
+  await ops.commit(a, { message: 'second', paths: [], all: true });
+  await ops.addRemote(a, srv);
+  await ops.push(a);
+  assert.ok(await ops.checkTagName('v1.0.0'));
+  assert.ok(!(await ops.checkTagName('bad name')));
+  await ops.createTag(a, 'v0.1', first);
+  await ops.createTag(a, 'v1.0.0', await ops.headOid(a), 'First release\n\nWith notes.');
+  const tags = await ops.tags(a);
+  const byName = Object.fromEntries(tags.map((t) => [t.name, t]));
+  assert.equal(byName['v0.1'].commit, first);
+  assert.ok(!byName['v0.1'].annotated);
+  assert.ok(byName['v1.0.0'].annotated);
+  assert.equal(byName['v1.0.0'].message, 'First release');
+  await ops.pushTag(a, 'v1.0.0');
+  assert.match(sb.sh(srv, 'tag'), /v1\.0\.0/);
+  const { oid } = await ops.deleteTag(a, 'v1.0.0', { remote: true });
+  assert.doesNotMatch(sb.sh(srv, 'tag'), /v1\.0\.0/, 'deleted on the server too');
+  await ops.restoreTag(a, 'v1.0.0', oid);
+  const back = (await ops.tags(a)).find((t) => t.name === 'v1.0.0');
+  assert.ok(back.annotated && back.message === 'First release', 'undo keeps the annotation');
+});
+
 test('compare two branches', async () => {
   const a = sb.repo('compare');
   sb.write(a, 'keep.txt', 'k\n');
