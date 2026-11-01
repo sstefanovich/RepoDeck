@@ -373,7 +373,7 @@ function renderSidebar() {
         const branch = st?.detached ? 'detached' : st?.branch || '';
         return `<div class="repo-item ${activeRepo ? 'active' : ''}" data-action="open-repo" data-repo="${esc(p)}" data-ws="${w.id}" title="${esc(p)}">
           <div class="ri-top"><span class="ri-name">${esc(basename(p))}</span>${busyLabel(p) ? `<span class="spinner sm" role="status" aria-label="${esc(busyLabel(p))}"></span>` : ''}</div>
-          <div class="ri-bottom"><span class="ri-branch">⎇ ${esc(branch)}</span><span class="ri-badges">${badgesHtml(st)}</span></div>
+          <div class="ri-bottom"><button class="ri-branch" data-action="branch-switcher" data-repo="${esc(p)}" title="Switch branch" ${st && !st.error && !st.missing ? '' : 'disabled'}>⎇ ${esc(branch)}</button><span class="ri-badges">${badgesHtml(st)}</span></div>
         </div>`;
       }).join('') || '<div class="muted small pad">No repos yet — click ＋</div>'}</div>`}
     </div>`;
@@ -590,7 +590,8 @@ function renderWorkspaceCards() {
         <div><div class="card-title">${esc(basename(p))}</div><div class="path">${esc(p)}</div></div>
         ${busyHtml(p)}
       </div>
-      <div class="card-branch">⎇ <b>${esc(st.detached ? 'detached HEAD' : st.branch || '')}</b></div>
+      <div class="card-branch">⎇ <b>${esc(st.detached ? 'detached HEAD' : st.branch || '')}</b>
+        ${st.error || st.missing ? '' : `<button class="btn small ghost" data-action="branch-switcher" data-repo="${esc(p)}" title="Switch this repo to another branch">Switch…</button>`}</div>
       <div class="facts">${facts}</div>
       <div class="card-actions">
         <button class="btn small primary" data-action="open-repo" data-repo="${esc(p)}" data-ws="${w.id}">Open</button>
@@ -670,7 +671,7 @@ function repoHeaderHtml(repo) {
     : `<button class="btn ${st.ahead || (!st.upstream && !st.initial && !st.detached) ? 'primary' : ''}" data-action="push" data-repo="${esc(repo)}" ${d} title="git push — uploads your commits to the server">↑ ${st.upstream || st.detached ? 'Send' : 'Publish branch'}${st.ahead ? ` (${st.ahead})` : ''}</button>`;
   return `${top}
     <div class="rh-bar">
-      <button class="branch-pill" data-action="branch-switcher" data-repo="${esc(repo)}" title="Switch or create branches" aria-haspopup="dialog">⎇ <b>${esc(branchLabel)}</b> <span class="muted" aria-hidden="true">▾</span></button>
+      <button class="branch-pill" data-action="branch-switcher" data-repo="${esc(repo)}" title="Switch to another branch, or create one" aria-haspopup="dialog">⎇ <b>${esc(branchLabel)}</b> <span class="pill-action">Switch branch ▾</span></button>
       <div class="sync-text" title="${esc(sync.replace(/<[^>]+>/g, ''))}">${sync}${checked ? ` <span class="muted small">(${checked})</span>` : ''}</div>
       <div class="spacer"></div>
       ${busyHtml(repo)}
