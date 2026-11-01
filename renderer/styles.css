@@ -640,3 +640,17 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
 .wi-row { display: flex; align-items: center; gap: 6px; font-size: 12.5px; }
 .wi-row > span:first-child { font-weight: 600; }
 .wi-row input { width: 110px; padding: 3px 8px; }
+/* blame */
+.blame { font: 12.5px/1.55 var(--mono); min-width: max-content; }
+.bl { display: flex; }
+.bl.g1 { background: var(--panel-2); }
+.bl.first { border-top: 1px solid var(--border); }
+.bl .bl-meta { width: 360px; flex-shrink: 0; display: flex; align-items: center; gap: 8px; padding: 0 8px; font: 12px "Segoe UI", system-ui, sans-serif; position: sticky; left: 0; background: inherit; overflow: hidden; }
+.bl.g0 .bl-meta { background: var(--panel); }
+.bl .ln { width: 44px; flex-shrink: 0; text-align: right; padding-right: 8px; color: var(--muted); opacity: .7; user-select: none; }
+.bl .code { white-space: pre; padding: 0 12px 0 6px; }
+.bl-hash { font: inherit; font-family: var(--mono); background: none; border: none; color: var(--accent); cursor: pointer; padding: 0; }
+.bl-hash:hover { text-decoration: underline; }
+.bl-who { color: var(--muted); white-space: nowrap; }
+.bl-sum { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bl-explain { flex-shrink: 0; }

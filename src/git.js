@@ -647,6 +647,30 @@ const ops = {
     return { commits, unpushed, incoming, upstream: up.ok ? up.stdout.trim() : null };
   },
 
+  // Who last changed each line of `file` (as it is on disk now; uncommitted lines have an all-zero hash).
+  // -> { lines: [{ hash, n, text }], commits: { hash: { author, time, summary } }, truncated }
+  async blame(repo, file) {
+    // blame takes a plain path (no pathspec magic); `--` keeps names like "-x" safe.
+    const r = await must(repo, ['blame', '--porcelain', '--', file], { quiet: true });
+    const lines = [];
+    const commits = {};
+    let cur = null;
+    for (const raw of r.stdout.split('\n')) {
+      if (raw.startsWith('\t')) {
+        if (lines.length < 20000) lines.push({ hash: cur.hash, n: cur.n, text: raw.slice(1).replace(/\r$/, '') });
+        continue;
+      }
+      const head = raw.match(/^([0-9a-f]{40}) \d+ (\d+)/);
+      if (head) { cur = { hash: head[1], n: +head[2] }; commits[cur.hash] ||= { author: '', time: 0, summary: '' }; continue; }
+      if (!cur) continue;
+      const c = commits[cur.hash];
+      if (raw.startsWith('author ')) c.author = raw.slice(7);
+      else if (raw.startsWith('author-time ')) c.time = +raw.slice(12);
+      else if (raw.startsWith('summary ')) c.summary = raw.slice(8);
+    }
+    return { lines, commits, truncated: lines.length >= 20000 };
+  },
+
   async commitDetails(repo, hash) {
     const meta = await must(repo, ['show', '-s', '--format=%H%x1f%an%x1f%ae%x1f%at%x1f%P%x1f%B', hash], { quiet: true });
     const [full, author, email, date, parents, body] = meta.stdout.split('\x1f');

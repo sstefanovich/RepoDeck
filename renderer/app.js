@@ -697,6 +697,7 @@ function openRepo(repo, wsId, tab) {
     state.selCommit = state.selStash = state.conflict = null;
     state.histRef = null;
     state.cmp = null;
+    state.blame = false;
     state.picks.clear();
     state.headKey = `${st.branch}|${st.oid}`;
   }
@@ -1007,7 +1008,7 @@ async function refreshDiff() {
       ${pickable ? `<span class="muted small" id="pick-count">${split ? 'Switch to Inline to commit only some lines.' : ''}</span>` : ''}
       <div class="spacer"></div>
       ${diffModeToggle()}
-      ${f.untracked ? '' : `<button class="btn small ghost" data-action="file-history" data-path="${esc(f.path)}" title="Every commit that changed this file">History</button>`}
+      ${f.untracked ? '' : `<button class="btn small ghost" data-action="file-history" data-path="${esc(f.path)}" title="Every commit that changed this file">History</button><button class="btn small ghost" data-action="file-blame" data-path="${esc(f.path)}" title="git blame — who last changed each line">Blame</button>`}
       <button class="btn small ghost" data-action="open-file" data-path="${esc(f.path)}">Open in ${esc(editorName())}</button>
     </div>
     <div class="diff-scroll">${d.kind === 'text' ? renderDiff(d.text, { file: f.path, picked: pickable ? (k) => isPicked(repo, f.path, k) : null }) : diffBody(d, f.path)}</div>`;
@@ -1741,7 +1742,8 @@ function renderHistoryTab() {
       </select>
       ${ref ? `<label class="check"><input type="checkbox" data-action="hist-notin" ${state.histNotIn ? 'checked' : ''}> Hide commits already in ${esc(cur)}</label>` : ''}
       <input class="filter" id="hist-search" placeholder="Search message, author or hash…" value="${esc(state.histQuery)}" spellcheck="false" aria-label="Search commits">
-      ${state.histFile ? `<span class="chip on" title="${esc(state.histFile)}">Only changes to ${esc(basename(state.histFile))} <button class="chip-x" data-action="clear-file-history" aria-label="Show all commits">✕</button></span>` : ''}
+      ${state.histFile ? `<span class="chip on" title="${esc(state.histFile)}">Only changes to ${esc(basename(state.histFile))} <button class="chip-x" data-action="clear-file-history" aria-label="Show all commits">✕</button></span>
+        <div class="seg small" role="group" aria-label="Right-hand side shows"><button class="seg-btn ${state.blame ? '' : 'active'}" data-action="blame-mode" data-on="">Commit details</button><button class="seg-btn ${state.blame ? 'active' : ''}" data-action="blame-mode" data-on="1" title="git blame">Who changed each line</button></div>` : ''}
       ${!ref && !state.histFile && st.branch ? `<button class="btn ghost" data-action="tidy-commits" title="Combine, reword or drop commits you haven't sent yet (git rebase -i)">✎ Tidy unsent commits…</button>` : ''}
       <div class="spacer"></div>
       <div id="pick-bar" class="pick-bar"></div>
@@ -1773,7 +1775,42 @@ function renderHistoryTab() {
     <div class="pane-right" id="commit-pane"></div>
   </div>`;
   bind();
-  loadCommitDetails();
+  if (state.histFile && state.blame) loadBlame();
+  else loadCommitDetails();
+}
+
+// "Who changed each line" for the file History is showing: lines grouped by the commit that last changed them.
+async function loadBlame() {
+  const repo = currentRepo();
+  const file = state.histFile;
+  const pane = $('#commit-pane');
+  if (!pane || !file) return;
+  pane.innerHTML = '<div class="empty muted"><span class="spinner"></span></div>';
+  let b;
+  try { b = await gitRaw('blame', repo, file); }
+  catch (e) { pane.innerHTML = `<pre class="raw">${esc(e.message)}</pre>`; return; }
+  if (!$('#commit-pane') || state.histFile !== file || !state.blame) return;
+  const groups = [];
+  for (const l of b.lines) {
+    const g = groups[groups.length - 1];
+    if (g && g.hash === l.hash) g.lines.push(l);
+    else groups.push({ hash: l.hash, lines: [l] });
+  }
+  const lang = langOf(file);
+  const meta = (g) => {
+    if (/^0+$/.test(g.hash)) return '<span class="bl-meta"><span class="muted">Not committed yet</span></span>';
+    const c = b.commits[g.hash];
+    const from = g.lines[0].n;
+    const to = g.lines[g.lines.length - 1].n;
+    return `<span class="bl-meta"><button class="bl-hash mono" data-action="blame-commit" data-hash="${g.hash}" title="Show this commit">${g.hash.slice(0, 7)}</button>
+      <span class="bl-who">${esc(c.author)} · ${timeAgo(c.time)}</span>
+      <span class="bl-sum" title="${esc(c.summary)}">${esc(c.summary)}</span>
+      <button class="icon-btn bl-explain" data-action="blame-explain" data-hash="${g.hash}" data-from="${from}" data-to="${to}" title="Ask Claude why these lines were changed">✦</button></span>`;
+  };
+  const html = groups.map((g, gi) => g.lines.map((l, i) => `<div class="bl g${gi % 2} ${i ? '' : 'first'}">${i ? '<span class="bl-meta"></span>' : meta(g)}<span class="ln">${l.n}</span><span class="code">${highlight(l.text, lang) || ' '}</span></div>`).join('')).join('');
+  const shaped = Object.keys(b.commits).filter((h) => !/^0+$/.test(h)).length;
+  pane.innerHTML = `<div class="diff-head"><b>${esc(file)}</b><span class="muted small">${plural(shaped, 'commit')} shaped this file as it is now${b.truncated ? ' (showing the first 20,000 lines)' : ''}</span></div>
+    <div class="diff-scroll"><div class="blame">${html}</div></div>`;
 }
 
 // Search hides non-matching rows (and the graph, whose lines would no longer join up).
@@ -3476,7 +3513,11 @@ const actions = {
     else if (state.tab === 'compare') loadCompareDiff();
     else if (state.tab === 'shelf') loadStashPreview();
   },
-  'file-history': (t, e) => { e?.stopPropagation(); showFileHistory(t.dataset.path); },
+  'file-history': (t, e) => { e?.stopPropagation(); state.blame = false; showFileHistory(t.dataset.path); },
+  'file-blame': (t, e) => { e?.stopPropagation(); state.blame = true; showFileHistory(t.dataset.path); },
+  'blame-mode': (t) => { state.blame = !!t.dataset.on; renderHistoryTab(); },
+  'blame-commit': (t) => { state.blame = false; state.selCommit = t.dataset.hash; renderHistoryTab(); },
+  'blame-explain': (t) => askClaude(`In ${state.histFile}, lines ${t.dataset.from}–${t.dataset.to} were last changed by commit ${t.dataset.hash.slice(0, 10)}. Explain in plain English what that commit did to those lines and why it was probably done. Look at it with git show.`),
   'update-from': (t) => { closePopover(); updateFrom(t.dataset.repo || currentRepo()); },
   'ws-update-from': () => wsUpdateFrom(),
   'finish-branch': (t) => { closePopover(); finishBranch(t.dataset.repo || currentRepo()); },
@@ -3495,7 +3536,7 @@ const actions = {
   'cmp-swap': () => { const c = state.cmp; if (c) showCompare(c.head, c.base); },
   'cmp-range': (t) => { const c = state.cmp; if (!c || c.mode === t.dataset.mode) return; c.mode = t.dataset.mode; c.data = null; renderCompareTab(); loadCompare(); },
   'cmp-file': (t) => { state.cmp.sel = t.dataset.path; document.querySelectorAll('#tab-body .file').forEach((f) => f.classList.toggle('selected', f === t)); loadCompareDiff(); },
-  'clear-file-history': () => { state.histFile = null; state.history = null; renderHistoryTab(); loadHistory(); },
+  'clear-file-history': () => { state.histFile = null; state.blame = false; state.history = null; renderHistoryTab(); loadHistory(); },
   'open-menu': (t) => (popoverEl ? closePopover() : openMenu(t, t.dataset.repo)),
   'branch-switcher': (t) => (popoverEl ? closePopover() : openBranchSwitcher(t, t.dataset.repo)),
   'switcher-pick': (t) => {

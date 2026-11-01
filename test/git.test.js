@@ -465,6 +465,23 @@ test('tidy unsent commits: combine, reword, drop', async () => {
   assert.equal((await ops.unsentCommits(a)).commits.length, 0);
 });
 
+test('blame: who changed each line', async () => {
+  const a = sb.repo('blame');
+  sb.write(a, 'f.txt', 'one\ntwo\nthree\n');
+  await ops.commit(a, { message: 'first version', paths: [], all: true });
+  sb.write(a, 'f.txt', 'one\nTWO\nthree\n');
+  sb.sh(a, '-c', 'user.name=Someone Else', 'commit', '-qam', 'shout two');
+  sb.write(a, 'f.txt', 'one\nTWO\nthree\nfour (not committed)\n');
+  const b = await ops.blame(a, 'f.txt');
+  assert.deepEqual(b.lines.map((l) => l.text), ['one', 'TWO', 'three', 'four (not committed)']);
+  const who = (n) => b.commits[b.lines[n].hash];
+  assert.equal(who(0).summary, 'first version');
+  assert.equal(who(1).summary, 'shout two');
+  assert.equal(who(1).author, 'Someone Else');
+  assert.ok(/^0+$/.test(b.lines[3].hash), 'uncommitted lines have no commit');
+  assert.deepEqual(b.lines.map((l) => l.n), [1, 2, 3, 4]);
+});
+
 test('compare two branches', async () => {
   const a = sb.repo('compare');
   sb.write(a, 'keep.txt', 'k\n');
