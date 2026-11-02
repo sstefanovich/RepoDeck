@@ -173,7 +173,7 @@ async function showError(title, err) {
     body: `${nice ? `<p>${esc(nice)}</p>` : '<p>Git reported a problem:</p>'}
       <details ${nice ? '' : 'open'}><summary>What git actually said</summary><pre class="raw">${esc(raw)}</pre></details>`,
     buttons: [
-      ...(claudeScope() ? [{ id: 'claude', label: '✦ Ask Claude why' }] : []),
+      ...(aiOn() && claudeScope() ? [{ id: 'claude', label: '✦ Ask Claude why' }] : []),
       ...(identity ? [{ id: 'ok', label: 'Close' }, { id: 'id', label: 'Set my name & email', kind: 'primary' }] : [{ id: 'ok', label: 'OK', kind: 'primary' }]),
     ],
   });
@@ -3009,7 +3009,12 @@ async function openSettings() {
       <p class="hint">You can always hold <b>Shift</b> while clicking a button to preview just that one action.</p>
       <h3>Cherry-pick</h3>
       <label class="check"><input type="checkbox" name="cpx" ${s.cherryPickX ? 'checked' : ''}> Add “(cherry picked from commit …)” to cherry-picked commit messages</label>
-      <h3>Claude</h3>
+      <h3>AI assistant</h3>
+      <label class="field"><span>Assistant</span><select name="assistant">
+        <option value="claude" ${s.assistant !== 'off' ? 'selected' : ''}>Claude (Claude Code)</option>
+        <option value="off" ${s.assistant === 'off' ? 'selected' : ''}>Off — hide all the ✦ assistant features</option>
+      </select></label>
+      <p class="hint">Turn it off if you don't have Claude: the Ask Claude panel, Ctrl+J and every ✦ button (Write message, Explain, Ask why) are hidden. Everything else works the same.</p>
       <p class="hint">The Claude panel runs the Claude Code app (<code>claude</code>) you already have, signed in as you.${claudeExe ? ` Found: <code>${esc(claudeExe)}</code>` : ' <b>Not found yet</b> — install it or enter its path below.'}</p>
       <label class="field"><span>claude.exe location (leave empty to find it automatically)</span><input name="claudePath" value="${esc(s.claudePath || '')}" placeholder="C:\\Users\\you\\.local\\bin\\claude.exe"></label>
       <label class="field"><span>Model (leave empty for your Claude Code default)</span><input name="claudeModel" value="${esc(s.claudeModel || '')}" placeholder="e.g. opus, sonnet, haiku"></label>
@@ -3033,6 +3038,7 @@ async function openSettings() {
     for (const k of Object.keys(prLoaded)) delete prLoaded[k];
     loadPrStatus(currentRepo(), true);
   }
+  s.assistant = v.assistant;
   s.claudePath = v.claudePath.trim();
   s.claudeModel = v.claudeModel.trim();
   s.previewCommands = v.preview;
@@ -3041,6 +3047,7 @@ async function openSettings() {
   if (v.name.trim() && v.email.trim() && (v.name.trim() !== id.name || v.email.trim() !== id.email)) {
     try { await git('setIdentity', v.name.trim(), v.email.trim()); } catch (e) { showError("Couldn't save your name/email", e); }
   }
+  applyAssistant();
   toast('Settings saved.', 'ok');
   rerender();
 }
@@ -3194,7 +3201,7 @@ function paletteCommands() {
     { label: 'Open repo folder…', hint: 'add', run: () => addRepo(state.view.ws) },
     { label: 'Clone a repo…', hint: 'add', run: () => cloneRepo() },
     { label: 'New workspace…', hint: 'add', run: () => newWorkspace() },
-    { label: 'Ask Claude', hint: 'Ctrl+J', run: () => toggleClaude(true) },
+    ...(aiOn() ? [{ label: 'Ask Claude', hint: 'Ctrl+J', run: () => toggleClaude(true) }] : []),
     { label: 'Settings', hint: '', run: () => openSettings() },
     { label: 'Git explained', hint: 'help', run: () => openHelp() },
     { label: `Theme: ${state.config.settings.theme === 'dark' ? 'light' : 'dark'}`, hint: 'appearance', run: () => { state.config.settings.theme = state.config.settings.theme === 'dark' ? 'light' : 'dark'; saveConfig(); } },
@@ -3314,6 +3321,7 @@ async function loadChats() {
 
 // Opens the panel and sends a prepared question (used by the ✦ buttons around the app).
 function askClaude(text) {
+  if (!aiOn()) return;
   toggleClaude(true);
   selectChatForView();
   if (cl.running) { $('#cp-input').value = text; toast('Claude is still busy — your question is ready in the box.', 'info'); return; }
@@ -3369,7 +3377,16 @@ function claudeContext() {
   return `<repodeck-context>\n${lines.join('\n')}\n</repodeck-context>\n\n`;
 }
 
+// The AI assistant can be turned off in Settings (e.g. for people without Claude). Then the panel
+// can't open and every ✦ button is hidden (see body.no-ai in styles.css).
+const aiOn = () => state.config.settings.assistant !== 'off';
+function applyAssistant() {
+  document.body.classList.toggle('no-ai', !aiOn());
+  if (!aiOn()) $('#claude-panel').hidden = true;
+}
+
 function toggleClaude(open = $('#claude-panel').hidden) {
+  if (open && !aiOn()) return;
   $('#claude-panel').hidden = !open;
   if (state.config.settings.claudeOpen !== open) { state.config.settings.claudeOpen = open; saveConfig(); }
   if (open) { renderClaude(); $('#cp-input').focus(); }
@@ -4037,6 +4054,7 @@ async function init() {
   });
   api.onUpdate((u) => toast(`RepoDeck ${u.version} is ready to install.`, 'info', { label: 'Restart now', fn: () => api.restartToUpdate() }));
   await loadChats();
+  applyAssistant();
   if (state.config.settings.claudeOpen) toggleClaude(true);
   renderLog();
   const first = state.config.workspaces[0];

@@ -167,6 +167,7 @@ Then click **📂 Open repo folder…** (or drag a folder onto the window). On f
 | Azure DevOps | A personal access token for pull request status (stored encrypted) |
 | Preview commands | Always show git commands before running an action |
 | Cherry-pick note | Add “(cherry picked from commit …)” to cherry-picked commits |
+| AI assistant | Claude, or Off to hide the Claude panel and every ✦ button (for people without Claude) |
 | Claude | Path to `claude.exe` (found automatically if empty) and model |
 | Automatic checking | How often to check servers for new commits |
 

@@ -669,3 +669,11 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
 .ws-hit { font: inherit; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px 12px; width: 100%; text-align: left; padding: 6px 8px; border: none; border-radius: 6px; background: none; color: var(--text); cursor: pointer; }
 .ws-hit:hover, .ws-hit:focus-visible { background: var(--accent-soft); }
 .ws-hit > span:first-child { min-width: 0; overflow-wrap: anywhere; }
+/* AI assistant turned off in Settings: hide the panel and every ✦ entry point. */
+body.no-ai #claude-panel,
+body.no-ai [data-action="claude-toggle"],
+body.no-ai [data-action="claude-open"],
+body.no-ai [data-action="write-message"],
+body.no-ai [data-action="explain-commit"],
+body.no-ai [data-action="explain-conflict"],
+body.no-ai [data-action="blame-explain"] { display: none !important; }
