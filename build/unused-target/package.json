@@ -1,0 +1,7 @@
+{
+  "name": "unused-builder-target",
+  "version": "26.18.1",
+  "description": "Stands in for electron-builder's Squirrel.Windows and macOS DMG targets, which RepoDeck doesn't build. See the overrides in the main package.json.",
+  "main": "index.js",
+  "private": true
+}

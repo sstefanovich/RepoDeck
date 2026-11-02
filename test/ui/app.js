@@ -27,7 +27,10 @@ async function launchApp(repos, settings = {}) {
   const env = { ...process.env, GIT_CONFIG_GLOBAL: gitConfig };
   delete env.ELECTRON_RUN_AS_NODE;
   // Port 0: Chromium picks a free port and writes it to DevToolsActivePort.
-  const child = spawn(electron, [ROOT, `--user-data-dir=${userData}`, '--remote-debugging-port=0'], { env, stdio: 'ignore' });
+  // REPODECK_EXE runs the tests against a built app (e.g. dist\win-unpacked\RepoDeck.exe) instead of the source.
+  const flags = [`--user-data-dir=${userData}`, '--remote-debugging-port=0'];
+  const exe = process.env.REPODECK_EXE;
+  const child = exe ? spawn(path.resolve(exe), flags, { env, stdio: 'ignore' }) : spawn(electron, [ROOT, ...flags], { env, stdio: 'ignore' });
 
   const portFile = path.join(userData, 'DevToolsActivePort');
   let page;
