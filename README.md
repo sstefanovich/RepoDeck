@@ -144,9 +144,9 @@ Ask Claude about your repos in plain English, for example *"Which commits on mai
 - [Git](https://git-scm.com/) on your `PATH`
 - Optional: [Claude Code](https://claude.com/claude-code) (`claude`), for the Claude features
 
-**Install:** run `RepoDeck Setup <version>.exe` (one installer for both x64 and ARM64 Windows).
+**Install:** run `RepoDeck-Setup-<version>.exe` (one installer for both x64 and ARM64 Windows). It installs for the current user, without needing admin rights, and adds Start menu and desktop shortcuts. Uninstalling keeps your settings.
 
-**Or run from source** (needs [Node.js](https://nodejs.org/) 20 or newer):
+**Or run from source** (needs [Node.js](https://nodejs.org/) 22.12 or newer):
 
 ```bash
 git clone <this repo>
@@ -195,8 +195,29 @@ npm run test:ui  # screen tests: opens the app on a throwaway repo, clicks throu
                  # at two window sizes and checks nothing spills out or gets cut off
                  # (SHOTS=1 also saves pictures of the newer screens to test/ui/output)
 npm run check  # syntax-check every source file
-npm run dist   # build the Windows installer into dist/
+npm run setup      # build the installer: dist/RepoDeck-Setup-<version>.exe (x64 + ARM64, ~225 MB)
+npm run setup:x64  # smaller x64-only installer: dist/RepoDeck-Setup-<version>-x64.exe (~115 MB)
 ```
+
+To test the built app rather than the source, point the screen tests at it:
+`REPODECK_EXE=dist/win-unpacked/RepoDeck.exe npm run test:ui`.
+
+### Building a setup file for distribution
+
+1. Set the version in `package.json` (`npm version 0.2.0` does this and makes a git tag).
+2. Run `npm run setup`. The installer and its `.blockmap` (used by auto-update) are written to `dist/`.
+3. Hand out `RepoDeck-Setup-<version>.exe`.
+
+**Code signing.** Unsigned installers make Windows SmartScreen show "Windows protected your PC", and people have to click *More info → Run anyway*. To sign, get a code signing certificate and set these before `npm run setup`. electron-builder then signs the app and the installer automatically:
+
+```bash
+CSC_LINK=path/to/certificate.pfx        # or the certificate as base64
+CSC_KEY_PASSWORD=<certificate password>
+```
+
+Azure Trusted Signing works too, through `win.azureSignOptions` in the `build` section ([electron-builder docs](https://www.electron.build/code-signing-win)).
+
+**Dependencies.** `package.json` has `overrides` that keep electron-builder's dependencies on current, non-deprecated versions (`npm install` reports no deprecations and `npm audit` no vulnerabilities). electron-builder's Squirrel.Windows and macOS DMG targets point at a placeholder (`build/unused-target`), because only the NSIS installer is built.
 
 **Auto-update:** installed copies check for updates when a `publish` target is set in the `build` section of `package.json` (for example `"publish": { "provider": "github", "owner": "you", "repo": "repodeck" }`). Without one, update checks are skipped.
 
