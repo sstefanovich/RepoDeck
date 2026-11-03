@@ -116,3 +116,19 @@ test('markdown is escaped and supports code and lists', () => {
   assert.match(html, /<ul><li>one<\/li><li>two<\/li><\/ul>/);
   assert.ok(!html.includes('<script>'));
 });
+
+test('repos move or copy between workspaces', () => {
+  const [web, api, docs] = ['C:\\src\\web', 'C:\\src\\api', 'C:\\src\\docs'];
+  const ws = () => [{ id: 'a', repos: [web, api] }, { id: 'b', repos: [docs] }];
+  let w = ws();
+  assert.equal(lib.moveRepo(w, web, 'a', 'b'), true);
+  assert.deepEqual(w.map((x) => x.repos), [[api], [docs, web]]);
+  w = ws();
+  assert.equal(lib.moveRepo(w, web, 'a', 'b', true), true, 'copy');
+  assert.deepEqual(w.map((x) => x.repos), [[web, api], [docs, web]]);
+  assert.equal(lib.moveRepo(w, 'c:\\src\\web\\', 'a', 'b', true), false, 'already there (case and trailing slash ignored)');
+  assert.equal(lib.moveRepo(w, web, 'a', 'b'), true, 'moving drops the copy left behind');
+  assert.deepEqual(w[0].repos, [api]);
+  assert.equal(lib.moveRepo(w, api, 'a', 'a'), false, 'same workspace');
+  assert.equal(lib.moveRepo(w, api, 'a', 'nope'), false, 'unknown workspace');
+});

@@ -10,13 +10,13 @@ const ROOT = path.join(__dirname, '..', '..');
 const OUT = path.join(__dirname, 'output');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function launchApp(repos, settings = {}) {
+async function launchApp(repos, settings = {}, { workspaces = [] } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'repodeck-ui-'));
   const userData = path.join(dir, 'user-data');
   fs.mkdirSync(userData);
   const ws = { id: 'ui', name: 'UI tests', repos };
   fs.writeFileSync(path.join(userData, 'config.json'), JSON.stringify({
-    workspaces: [ws],
+    workspaces: [ws, ...workspaces],
     settings: { autoFetchMinutes: 0, theme: 'dark', ...settings },
     tabs: [{ type: 'repo', path: repos[0], ws: 'ui' }],
     activeTab: `repo:${repos[0].toLowerCase()}`,

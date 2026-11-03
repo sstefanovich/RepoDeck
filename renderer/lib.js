@@ -449,7 +449,20 @@ function fuzzyScore(query, text) {
   return score;
 }
 
+// Moves a repo from one workspace to another (with `copy`, adds it and leaves it where it was too).
+// Changes the workspaces in place. Returns false if nothing changed.
+function moveRepo(workspaces, repo, fromId, toId, copy = false) {
+  const from = workspaces.find((w) => w.id === fromId);
+  const to = workspaces.find((w) => w.id === toId);
+  if (!to || fromId === toId) return false;
+  const added = !to.repos.some((p) => samePath(p, repo));
+  if (added) to.repos.push(repo);
+  const removed = !copy && !!from?.repos.some((p) => samePath(p, repo));
+  if (removed) from.repos = from.repos.filter((p) => !samePath(p, repo));
+  return added || removed;
+}
+
 if (typeof module !== 'undefined') {
   module.exports = { esc, basename, norm, samePath, plural, timeAgo, parseConflicts, pickLines, myers, diffLines, sideBySide, inlineDiff, toLines, md,
-    langOf, tokenize, highlight, changeRange, parseUnified, pairHunk, lineKeyer, changedLines, partialPatch, workItemFromBranch, withWorkItem, graphRows, fuzzyScore };
+    langOf, tokenize, highlight, changeRange, parseUnified, pairHunk, lineKeyer, changedLines, partialPatch, workItemFromBranch, withWorkItem, graphRows, fuzzyScore, moveRepo };
 }
