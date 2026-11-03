@@ -434,7 +434,7 @@ function renderSidebar() {
   if (!ws.length) { list.innerHTML = '<div class="muted small pad">No workspaces yet.</div>'; return; }
   list.innerHTML = ws.map((w) => {
     const active = state.view.type === 'workspace' && state.view.ws === w.id;
-    return `<div class="ws">
+    return `<div class="ws" data-ws="${w.id}">
       <div class="ws-head ${active ? 'active' : ''}" data-action="open-ws" data-ws="${w.id}">
         <span class="caret" data-action="toggle-ws" data-ws="${w.id}">${w.collapsed ? '▸' : '▾'}</span>
         <span class="ws-name">${esc(w.name)}</span>
@@ -444,13 +444,79 @@ function renderSidebar() {
         const st = state.status[p];
         const activeRepo = samePath(currentRepo(), p) && state.view.ws === w.id;
         const branch = st?.detached ? 'detached' : st?.branch || '';
-        return `<div class="repo-item ${activeRepo ? 'active' : ''}" data-action="open-repo" data-repo="${esc(p)}" data-ws="${w.id}" title="${esc(p)}">
+        return `<div class="repo-item ${activeRepo ? 'active' : ''}" draggable="${ws.length > 1}" data-action="open-repo" data-repo="${esc(p)}" data-ws="${w.id}" title="${esc(p)}${ws.length > 1 ? '\nDrag onto another workspace to move it there (hold Ctrl to copy)' : ''}">
           <div class="ri-top"><span class="ri-name">${esc(basename(p))}</span>${busyLabel(p) ? `<span class="spinner sm" role="status" aria-label="${esc(busyLabel(p))}"></span>` : ''}</div>
           <div class="ri-bottom"><button class="ri-branch" data-action="branch-switcher" data-repo="${esc(p)}" title="Switch branch" ${st && !st.error && !st.missing ? '' : 'disabled'}>⎇ ${esc(branch)}</button><span class="ri-badges">${badgesHtml(st)}</span></div>
         </div>`;
       }).join('') || '<div class="muted small pad">No repos yet — click ＋</div>'}</div>`}
     </div>`;
   }).join('');
+}
+
+// Drag a repo in the sidebar onto another workspace to move it there (hold Ctrl to copy it instead).
+let dragRepo = null; // { path, ws } of the repo being dragged
+const repoDropTarget = (e) => { const w = e.target.closest?.('#ws-list .ws'); return w && w.dataset.ws !== dragRepo?.ws ? w : null; };
+const clearRepoDrag = () => document.querySelectorAll('.ws.drop-target, .repo-item.dragging').forEach((x) => x.classList.remove('drop-target', 'dragging'));
+document.addEventListener('dragstart', (e) => {
+  const r = e.target.closest?.('.repo-item[draggable=true]');
+  if (!r) return;
+  dragRepo = { path: r.dataset.repo, ws: r.dataset.ws };
+  e.dataTransfer.effectAllowed = 'copyMove';
+  e.dataTransfer.setData('text/plain', r.dataset.repo);
+  r.classList.add('dragging');
+});
+document.addEventListener('dragover', (e) => {
+  if (!dragRepo) return;
+  const w = repoDropTarget(e);
+  document.querySelectorAll('.ws.drop-target').forEach((x) => { if (x !== w) x.classList.remove('drop-target'); });
+  if (!w) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = e.ctrlKey ? 'copy' : 'move';
+  w.classList.add('drop-target');
+});
+document.addEventListener('dragend', () => { dragRepo = null; clearRepoDrag(); });
+document.addEventListener('drop', (e) => {
+  if (!dragRepo) return;
+  const w = repoDropTarget(e);
+  const d = dragRepo;
+  dragRepo = null;
+  clearRepoDrag();
+  if (!w) return;
+  e.preventDefault();
+  moveRepoTo(d.path, d.ws, w.dataset.ws, e.ctrlKey);
+});
+
+// Moves (or copies) a repo between workspaces, keeping its tab, with Undo.
+async function moveRepoTo(repo, fromId, toId, copy = false) {
+  const all = state.config.workspaces;
+  const from = all.find((w) => w.id === fromId);
+  const to = all.find((w) => w.id === toId);
+  if (!to) return;
+  const name = basename(repo);
+  const saved = [[from, from && [...from.repos]], [to, [...to.repos]]];
+  if (!moveRepo(all, repo, fromId, toId, copy)) { toast(`${name} is already in ${to.name}.`, 'info'); return; }
+  // An open tab of a moved repo now belongs to the workspace it went to.
+  const retarget = (a, b) => {
+    for (const t of state.tabs) if (t.type === 'repo' && t.ws === a && samePath(t.path, repo)) t.ws = b;
+    if (state.view.type === 'repo' && state.view.ws === a && samePath(state.view.path, repo)) state.view.ws = b;
+  };
+  if (!copy) retarget(fromId, toId);
+  const redraw = async () => {
+    await saveConfig();
+    persistTabs();
+    renderSidebar();
+    renderTabbar();
+    if (state.view.type === 'workspace' && currentWs()) openWorkspace(state.view.ws);
+  };
+  await redraw();
+  toast(copy ? `Added ${name} to ${to.name} too.` : `Moved ${name} to ${to.name}.`, 'ok', {
+    label: 'Undo',
+    fn: async () => {
+      for (const [w, repos] of saved) if (w && all.includes(w)) w.repos = repos;
+      if (!copy) retarget(toId, fromId);
+      await redraw();
+    },
+  });
 }
 
 // ---------- tabs (one per open repo / workspace overview) ----------
@@ -506,6 +572,60 @@ function closeTab(key, activateNext = true) {
   renderTabbar();
 }
 
+// Closes several tabs at once. If the active tab goes, `prefer` (when still open) takes its place,
+// otherwise the nearest open tab to its right, then to its left.
+function closeTabs(keys, prefer = null) {
+  const drop = new Set(keys);
+  if (!drop.size) return;
+  const old = state.tabs;
+  state.tabs = old.filter((x) => !drop.has(tabKey(x)));
+  if (drop.has(state.activeTab)) {
+    const i = old.findIndex((x) => tabKey(x) === state.activeTab);
+    const open = (x) => !drop.has(tabKey(x));
+    const next = state.tabs.find((x) => tabKey(x) === prefer) || old.slice(i + 1).find(open) || old.slice(0, i).reverse().find(open);
+    if (next) activateTab(tabKey(next));
+    else showNoTab();
+  }
+  persistTabs();
+  renderTabbar();
+}
+
+// Which tabs each "Close …" item of a tab's right-click menu would close.
+function tabCloseSets(key) {
+  const keys = state.tabs.map(tabKey);
+  const i = keys.indexOf(key);
+  const t = state.tabs[i];
+  return {
+    others: keys.filter((k) => k !== key),
+    right: keys.slice(i + 1),
+    left: keys.slice(0, i),
+    all: keys,
+    // Tabs that belong to a different workspace than this one.
+    otherWs: t?.ws ? state.tabs.filter((x) => x.ws && x.ws !== t.ws).map(tabKey) : [],
+  };
+}
+
+function openTabMenu(e, key) {
+  const t = state.tabs.find((x) => tabKey(x) === key);
+  if (!t) return;
+  const sets = tabCloseSets(key);
+  const w = state.config.workspaces.find((x) => x.id === t.ws);
+  const item = (action, label, { which, hint = '', disabled = false } = {}) => `<button class="menu-item" role="menuitem" data-action="${action}" data-key="${esc(key)}" ${which ? `data-which="${which}"` : ''} ${t.path ? `data-repo="${esc(t.path)}"` : ''} ${disabled ? 'disabled' : ''}><span>${label}</span>${hint ? `<span class="muted small">${hint}</span>` : ''}</button>`;
+  const closeItem = (which, label) => item('tab-close-set', label, { which, hint: sets[which].length ? String(sets[which].length) : '', disabled: !sets[which].length });
+  popover({ getBoundingClientRect: () => ({ left: e.clientX, bottom: e.clientY - 4 }) }, `<div role="menu">
+    ${item('close-tab', 'Close', { hint: 'Ctrl+W' })}
+    ${closeItem('others', 'Close others')}
+    ${closeItem('right', 'Close tabs to the right')}
+    ${closeItem('left', 'Close tabs to the left')}
+    ${w && sets.otherWs.length ? closeItem('otherWs', `Close tabs not in ${esc(w.name)}`) : ''}
+    ${closeItem('all', 'Close all')}
+    ${t.type === 'repo' ? `<div class="menu-sep"></div>
+      ${item('open-editor', `Open in ${esc(editorName())}`)}
+      ${item('open-folder', 'Show in File Explorer')}
+      ${item('copy-path', 'Copy folder path')}` : ''}
+  </div>`, { width: 250, onOpen: (el) => el.querySelector('button:not(:disabled)')?.focus() });
+}
+
 // Drops tabs whose repo/workspace was removed.
 function pruneTabs() {
   state.tabs = state.tabs.filter(tabValid);
@@ -544,8 +664,18 @@ function renderTabbar() {
       ${st.branch || st.detached ? `<span class="dtab-branch">${esc(st.detached ? 'detached' : st.branch)}</span>` : ''}
       ${mark}${close}</div>`;
   }).join('');
+  markTabRows();
   bar.querySelector('.dtab.active')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
 }
+
+// Tabs wrap onto more rows when they don't fit. Only the bottom row joins the page below,
+// so tabs in the rows above are drawn as whole boxes.
+function markTabRows() {
+  const tabs = [...$('#tabbar').querySelectorAll('.dtab')];
+  const bottom = Math.max(...tabs.map((t) => t.offsetTop));
+  for (const t of tabs) t.classList.toggle('upper-row', t.offsetTop < bottom - 2);
+}
+new ResizeObserver(() => markTabRows()).observe(document.querySelector('#tabbar'));
 
 // Drag tabs to reorder them.
 let dragKey = null;
@@ -567,6 +697,12 @@ document.addEventListener('drop', (e) => {
 document.addEventListener('auxclick', (e) => {
   const t = e.target.closest('.dtab');
   if (t && e.button === 1) { e.preventDefault(); closeTab(t.dataset.key); }
+});
+document.addEventListener('contextmenu', (e) => {
+  const t = e.target.closest?.('.dtab');
+  if (!t) return;
+  e.preventDefault();
+  openTabMenu(e, t.dataset.key);
 });
 
 // ---------- home ----------
@@ -3768,7 +3904,9 @@ const actions = {
   },
   'open-repo-folder': () => addRepo(state.view.ws),
   'activate-tab': (t) => { if (t.dataset.key !== state.activeTab) activateTab(t.dataset.key); },
-  'close-tab': (t) => closeTab(t.dataset.key),
+  'close-tab': (t) => { closePopover(); closeTab(t.dataset.key); },
+  'tab-close-set': (t) => { closePopover(); closeTabs(tabCloseSets(t.dataset.key)[t.dataset.which], t.dataset.key); },
+  'copy-path': async (t) => { closePopover(); await navigator.clipboard.writeText(t.dataset.repo).catch(() => {}); toast('Folder path copied.', 'ok'); },
   'toggle-ws': (t, e) => { e.stopPropagation(); const w = state.config.workspaces.find((x) => x.id === t.dataset.ws); w.collapsed = !w.collapsed; saveConfig(); renderSidebar(); },
   'add-repo': (t, e) => { e.stopPropagation(); addRepo(t.dataset.ws || state.view.ws); },
   'open-repo': (t) => openRepo(t.dataset.repo, t.dataset.ws),

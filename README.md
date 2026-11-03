@@ -22,11 +22,13 @@ Most git tools assume you already know git and that you work in one repo at a ti
 
 - **Open repo folder** (or drag folders onto the window), or clone one. Group related repos into **workspaces**.
 - The sidebar shows each repo's branch, uncommitted changes (●), commits to send (↑) and commits to get (↓).
+- **Drag a repo** in the sidebar onto another workspace to move it there, or hold <kbd>Ctrl</kbd> while dropping to have it in both. The message that follows has an **Undo** button.
 - **Workspace actions** run on every repo at once: check for updates, get latest, send, *New branch in all*, *Switch all to branch*, *Update all from…* (bring `dev` or any branch into every repo, with a per-repo preview of what's coming and one Undo for all of them), *Tidy up branches*, *Open all in VS Code*.
 - **Search every repo** from the workspace page: commits by message, author or hash (on any branch), and branches by name. Click a commit to open it in the History of the branch it's on.
 - When branches were deleted on the server (their pull requests completed), the workspace page offers to **finish them all** in one go.
 - If your repos are on different branches, a banner says so and offers **Line them up**.
-- Each repo opens in its own **tab**, and tabs are remembered between launches.
+- Each repo opens in its own **tab**, and tabs are remembered between launches. Drag tabs to reorder them. When they don't fit they wrap onto more rows, so none are hidden.
+- **Right-click a tab** to close it, close the others, close the tabs to its right or left, close the tabs from other workspaces, or close all. Repo tabs also offer *Open in VS Code*, *Show in File Explorer* and *Copy folder path*. Middle-click closes a tab.
 
 ### Changes and commits
 
