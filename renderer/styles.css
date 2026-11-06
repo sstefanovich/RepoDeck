@@ -607,6 +607,13 @@ pre.raw { font: 12px/1.45 var(--mono); background: var(--panel-2); padding: 8px 
 .field > span { font-size: 12.5px; font-weight: 600; }
 .field .check { font-weight: 400; margin: 3px 0; }
 .row-inline { display: flex; gap: 6px; }
+.commit-issues { display: flex; flex-direction: column; gap: 6px; max-height: 50vh; overflow-y: auto; }
+.issue { display: flex; align-items: flex-start; gap: 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; cursor: pointer; }
+.issue.severe { border-color: var(--bad, #d9534f); }
+.issue input { margin-top: 3px; }
+.issue-icon { width: 1.4em; text-align: center; }
+.issue-text { min-width: 0; overflow-wrap: anywhere; }
+.issue-text .hint { display: block; margin: 2px 0 0; }
 .setup-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0 12px; }
 .intro code { word-break: break-all; }
 .choices { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }

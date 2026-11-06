@@ -1416,6 +1416,46 @@ function renderDiff(text, { maxLines = 6000, file = '', picked = null } = {}) {
   return split ? `<div class="sbs diff-sbs">${out.join('')}</div>` : `<div class="diff">${out.join('')}</div>`;
 }
 
+// Before a commit: looks for big files, likely secrets and build folders among the files about to go in,
+// and lets the user leave them out (adding a .gitignore line where that makes sense).
+// Returns { paths, all } to commit (unchanged if nothing was flagged or they chose to go ahead), or null to stop.
+const ISSUE_ICONS = { large: '⚖', secret: '🔑', build: '📦' };
+async function checkBeforeCommit(repo, { paths, all }) {
+  const issues = await gitRaw('commitCheck', repo, { paths, all }).catch(() => []);
+  if (!issues.length) return { paths, all };
+  const r = await modal({
+    title: 'Check these before committing',
+    wide: true,
+    body: `<p class="intro">Some of these files are usually kept out of a repo. Once a file has been sent to a server it stays in the history, so it's worth a look now.</p>
+      <div class="commit-issues">${issues.map((i, n) => `<label class="issue ${i.severe ? 'severe' : ''}">
+        <input type="checkbox" name="i${n}" checked>
+        <span class="issue-icon" aria-hidden="true">${ISSUE_ICONS[i.kind] || '•'}</span>
+        <span class="issue-text"><b>${esc(i.path)}</b> <span class="muted">— ${esc(i.detail)}</span>
+          <span class="hint">${i.ignore ? `Leave out, and add <code>${esc(i.ignore)}</code> to .gitignore so it stays out` : 'Leave this file out of the commit'}</span></span>
+      </label>`).join('')}</div>`,
+    buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'anyway', label: 'Commit them anyway' }, { id: 'ok', label: 'Leave the ticked ones out', kind: 'primary' }],
+  });
+  if (r.id === 'anyway') return { paths, all };
+  if (r.id !== 'ok') return null;
+  const chosen = issues.filter((_, n) => r.values[`i${n}`]);
+  if (!chosen.length) return { paths, all };
+  const out = new Set(chosen.flatMap((i) => i.files));
+  const patterns = chosen.map((i) => i.ignore).filter(Boolean);
+  if (patterns.length) await gitRaw('ignorePatterns', repo, patterns);
+  for (const f of out) if (state.checked[repo]) state.checked[repo][f] = false;
+  let files = paths || [];
+  if (all || !paths) {
+    await refreshRepo(repo);
+    files = changedFiles(state.status[repo]).flatMap((f) => (f.orig ? [f.path, f.orig] : [f.path]));
+  }
+  const keep = files.filter((p) => !out.has(p));
+  if (patterns.length && !keep.includes('.gitignore')) keep.push('.gitignore');
+  if (state.checked[repo] && patterns.length) state.checked[repo]['.gitignore'] = true;
+  if (!keep.length) { toast('Nothing is left to commit.', 'info'); return null; }
+  toast(`Left out ${plural(out.size, 'file')}${patterns.length ? ' and added them to .gitignore' : ''}.`, 'info');
+  return { paths: keep, all: false };
+}
+
 async function doCommit(repo, thenPush) {
   const st = state.status[repo];
   const summary = $('#commit-summary').value.trim();
@@ -1429,10 +1469,20 @@ async function doCommit(repo, thenPush) {
   const message = withWorkItem(body ? `${summary}\n\n${body}` : summary, $('#work-item')?.value);
   // Files with some lines left out: { file: [keys of the left-out lines] }.
   const partial = st.op ? null : Object.fromEntries(ticked.filter((f) => partlyPicked(repo, f.path)).map((f) => [f.path, [...state.excluded[repo][f.path]]]));
-  const some = partial && Object.keys(partial).length ? partial : null;
+  let some = partial && Object.keys(partial).length ? partial : null;
+  let all = !some && files.length > 0 && ticked.length === files.length;
+  let commitPaths = paths;
+  if (ticked.length) {
+    const checked = await checkBeforeCommit(repo, { paths, all });
+    if (!checked) { updateRepoView(); return; }
+    if (checked.paths !== paths) {
+      ({ paths: commitPaths, all } = checked);
+      if (some) { for (const k of Object.keys(some)) if (!commitPaths.includes(k)) delete some[k]; if (!Object.keys(some).length) some = null; }
+    }
+  }
   try {
     const before = await gitRaw('headOid', repo).catch(() => null);
-    await busy(repo, amend ? 'Amending…' : 'Committing…', () => git('commit', repo, { message, paths, all: !some && files.length > 0 && ticked.length === files.length, amend, partial: some }));
+    await busy(repo, amend ? 'Amending…' : 'Committing…', () => git('commit', repo, { message, paths: commitPaths, all, amend, partial: some }));
     clearPicks(repo);
     state.commitMsg[repo] = { summary: state.config.settings.commitTemplate || '', body: '' };
     $('#commit-summary').value = state.commitMsg[repo].summary;
@@ -3149,7 +3199,8 @@ async function setupNewRepo(wsId, folder, { notRepo = false } = {}) {
   const remote = v.remote.trim();
   const target = v.ws || wsId;
   try {
-    await git('setupRepo', folder, { branch: v.branch, gitignore: v.gitignore || null, message: v.message, remote });
+    // The first commit is made below, after the files are checked.
+    await git('setupRepo', folder, { branch: v.branch, gitignore: v.gitignore || null, message: v.message, remote, commit: false });
   } catch (e) {
     if (e.code === CANCELLED) return null;
     // A later step (say, the commit) can fail after git init worked: still show the repo so it can be fixed there.
@@ -3162,6 +3213,17 @@ async function setupNewRepo(wsId, folder, { notRepo = false } = {}) {
   const added = await attachRepo(target, folder);
   renderSidebar();
   openRepo(folder, added.w.id);
+  const checked = await checkBeforeCommit(folder, { paths: null, all: true });
+  if (!checked) {
+    toast('The repo is set up, but nothing is committed yet. Tick the files you want in Changes, then commit.', 'info');
+    return { ...added, opened: true };
+  }
+  try {
+    await busy(folder, 'Committing…', () => git('commit', folder, { message: v.message.trim() || 'Initial commit', paths: checked.paths || [], all: checked.all, allowEmpty: true }));
+  } catch (e) {
+    showError("The repo is set up, but the first commit didn't work", e);
+    return { ...added, opened: true };
+  }
   if (!remote) toast('Repo set up, with your files as the first commit. Click Send when you want to put it on a server.', 'ok');
   else if (!v.send) toast('Repo set up and linked to the server. Click Send when you\'re ready to publish it.', 'ok');
   else await publishNewRepo(folder);

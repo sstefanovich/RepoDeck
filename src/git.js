@@ -180,6 +180,47 @@ function httpsUrl(remote) {
   return m ? `https://${m[1]}/${m[2]}.git` : null;
 }
 
+// ---------- checks before a commit: big files, secrets, build folders ----------
+const BIG_FILE = 50 * 1024 * 1024;       // GitHub warns from 50 MB...
+const TOO_BIG_FILE = 100 * 1024 * 1024;  // ...and refuses a push with a file over 100 MB
+// Folders of downloaded packages or build output. [test on the path, the .gitignore line, a name for people]
+const BUILD_DIRS = [
+  [/(^|\/)node_modules\//, 'node_modules/', 'downloaded packages (node_modules)'],
+  [/(^|\/)(bin\/(Debug|Release)|obj)\//i, null, '.NET build output (bin/obj)'],
+  [/(^|\/)__pycache__\/|\.py[co]$/, '__pycache__/', 'Python byte code'],
+  [/(^|\/)\.?venv\/(Lib|lib|Scripts|bin|Include)\//, null, 'a Python virtual environment'],
+  [/(^|\/)\.vs\//, '.vs/', 'Visual Studio settings (.vs)'],
+  [/(^|\/)\.gradle\//, '.gradle/', 'Gradle cache'],
+  [/(^|\/)\.(next|nuxt|pytest_cache|mypy_cache|ruff_cache)\//, null, 'build or tool cache'],
+];
+const SECRET_FILES = [
+  [/(^|\/)\.env(\.(?!example$|sample$|template$|dist$)[^/]+)?$/i, 'environment settings, which often hold passwords and keys'],
+  [/\.(pem|key|pfx|p12|jks|keystore|publishsettings)$/i, 'a key or certificate file'],
+  [/(^|\/)id_(rsa|dsa|ecdsa|ed25519)$/, 'a private SSH key'],
+  [/(^|\/)(_netrc|\.netrc|\.pgpass|\.git-credentials)$/i, 'a file of saved logins'],
+];
+const SECRET_TEXT = [
+  [/-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----/, 'a private key'],
+  [/\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36}\b|\bgithub_pat_[A-Za-z0-9_]{60,}/, 'a GitHub token'],
+  [/\bAKIA[0-9A-Z]{16}\b/, 'an AWS access key'],
+  [/\bxox[abprs]-[A-Za-z0-9-]{10,}/, 'a Slack token'],
+  [/\bsk-ant-[A-Za-z0-9_-]{20,}/, 'an Anthropic API key'],
+  [/\bsk-(?:proj-)?[A-Za-z0-9_-]{32,}/, 'an OpenAI API key'],
+  [/\bAIza[0-9A-Za-z_-]{35}\b/, 'a Google API key'],
+  [/\b[rs]k_live_[0-9A-Za-z]{20,}/, 'a Stripe live key'],
+  [/AccountKey=[A-Za-z0-9+/]{40,}={0,2}/, 'an Azure storage key'],
+  [/\b(?:Password|Pwd)\s*=\s*(?!["']?\s*(?:[<{$*%]|\[|$|;))[^;"'\s]{6,}/i, 'a password in a connection string'],
+];
+const MAX_SCAN = 2 * 1024 * 1024; // don't read files bigger than this for secrets
+
+function secretIn(text) {
+  for (const [re, what] of SECRET_TEXT) {
+    const m = text.match(re);
+    if (m) return what;
+  }
+  return null;
+}
+
 // ---------- starter .gitignore files for new repos ----------
 const OS_JUNK = ['# Editor and OS files', '.vscode/*', '!.vscode/settings.json', '!.vscode/extensions.json', '.idea/', 'Thumbs.db', 'Desktop.ini', '.DS_Store', '*.swp', ''];
 const GITIGNORES = {
@@ -234,16 +275,19 @@ const ops = {
 
   // Turns a plain folder into a repo: git init on `branch`, an optional starter .gitignore
   // (never replacing one that's there), a first commit of everything, and optionally the server.
-  async setupRepo(folder, { branch = 'main', gitignore = null, message = '', remote = '' } = {}) {
+  // commit: false leaves the first commit to the caller (the UI checks the files first).
+  async setupRepo(folder, { branch = 'main', gitignore = null, message = '', remote = '', commit = true } = {}) {
     const b = (branch || 'main').trim();
     if (!(await ops.checkBranchName(b))) throw new GitError(`"${b}" can't be used as a branch name.`, 'BAD_NAME');
     const url = (remote || '').trim();
     await must(folder, ['init', '-b', b]);
     const ignoreFile = path.join(folder, '.gitignore');
     if (gitignore && GITIGNORES[gitignore] && !fs.existsSync(ignoreFile)) fs.writeFileSync(ignoreFile, GITIGNORES[gitignore].text);
-    await must(folder, ['add', '-A']);
-    // --allow-empty so an empty folder still gets a first commit (and so a branch that can be sent).
-    await must(folder, ['commit', '--allow-empty', '-m', (message || '').trim() || 'Initial commit']);
+    if (commit) {
+      await must(folder, ['add', '-A']);
+      // --allow-empty so an empty folder still gets a first commit (and so a branch that can be sent).
+      await must(folder, ['commit', '--allow-empty', '-m', (message || '').trim() || 'Initial commit']);
+    }
     if (url) await must(folder, ['remote', 'add', 'origin', url]);
     return { path: folder, branch: b };
   },
@@ -315,10 +359,10 @@ const ops = {
 
   // amend: fold the changes into the last commit (and replace its message) instead of making a new one.
   // partial: { file: [lineKey…] } — for these files, commit everything except the listed lines.
-  async commit(repo, { message, paths, all, amend = false, partial = null }) {
+  async commit(repo, { message, paths, all, amend = false, partial = null, allowEmpty = false }) {
     const st = await ops.status(repo);
     if (st.conflicted.length) throw new GitError('You have unresolved conflicts. Resolve them first.', 'CONFLICTS');
-    const amendArg = amend ? ['--amend'] : [];
+    const amendArg = [...(amend ? ['--amend'] : []), ...(allowEmpty ? ['--allow-empty'] : [])];
     if (partial && Object.keys(partial).length) {
       if (st.op || st.initial) throw new GitError('Picking single lines only works on a normal commit (not during a merge, or before the first commit).');
       const patches = await partialPatches(repo, partial);
@@ -444,6 +488,86 @@ const ops = {
     const label = paths.length === 1 ? paths[0] : `${paths.length} files`;
     await must(repo, ['stash', 'push', '--include-untracked', '-m', `[discarded] ${label}`, '--pathspec-from-file=-', '--pathspec-file-nul'], { input: paths.map(lit).join('\0') });
     return { trashed: false };
+  },
+
+  // Looks at what a commit is about to include and returns what deserves a second look:
+  // big files, likely secrets (by name, or in the added lines) and new build/package folders.
+  // paths: the ticked files (null with all = everything). Each issue:
+  // { kind: 'large'|'secret'|'build', path, files, detail, ignore (a .gitignore line, or null), severe }
+  async commitCheck(repo, { paths = null, all = false } = {}) {
+    const st = await ops.status(repo);
+    const state = new Map(); // path -> 'new' | 'changed'
+    for (const f of [...st.staged, ...st.unstaged]) {
+      if (f.code === 'D') continue;
+      state.set(f.path, state.get(f.path) === 'new' || f.code === 'A' ? 'new' : 'changed');
+    }
+    for (const f of st.untracked) state.set(f.path, 'new');
+    const want = all || !paths ? null : new Set(paths);
+    const issues = [];
+    const builds = new Map(); // folder -> issue
+    const changed = [];
+    for (const [p, kind] of state) {
+      if (want && !want.has(p)) continue;
+      if (kind === 'new') {
+        const b = BUILD_DIRS.find(([re]) => re.test(p));
+        if (b) {
+          const m = p.match(b[0]);
+          const folder = p.slice(0, m.index + m[0].length);
+          if (!builds.has(folder)) builds.set(folder, { kind: 'build', path: folder, files: [], detail: b[2], ignore: b[1] || `/${folder}`, severe: false });
+          builds.get(folder).files.push(p);
+          continue;
+        }
+      }
+      let size;
+      try { size = fs.statSync(path.join(repo, p)).size; } catch { continue; }
+      if (size >= BIG_FILE) {
+        issues.push({ kind: 'large', path: p, files: [p], ignore: `/${p}`, severe: size >= TOO_BIG_FILE,
+          detail: `${Math.round(size / 1024 / 1024)} MB${size >= TOO_BIG_FILE ? ' — GitHub refuses files over 100 MB' : ''}` });
+        continue;
+      }
+      const sf = kind === 'new' && SECRET_FILES.find(([re]) => re.test(p));
+      if (sf) { issues.push({ kind: 'secret', path: p, files: [p], detail: sf[1], ignore: `/${p}`, severe: true }); continue; }
+      if (size > MAX_SCAN) continue;
+      if (kind === 'changed') { changed.push(p); continue; }
+      let buf;
+      try { buf = fs.readFileSync(path.join(repo, p)); } catch { continue; }
+      if (buf.subarray(0, 8000).includes(0)) continue; // binary
+      const what = secretIn(buf.toString('utf8'));
+      if (what) issues.push({ kind: 'secret', path: p, files: [p], detail: `looks like it contains ${what}`, ignore: null, severe: true });
+    }
+    // For files already in the repo, only the lines being added count.
+    if (changed.length && !st.initial) {
+      // git diff has no --pathspec-from-file, so the paths go on the command line, in batches.
+      let out = '';
+      for (let i = 0; i < changed.length; i += 100) {
+        out += (await run(repo, ['diff', '-U0', '--no-color', '--no-ext-diff', 'HEAD', '--', ...changed.slice(i, i + 100).map(lit)], { quiet: true })).stdout;
+      }
+      const added = new Map();
+      let file = null;
+      for (const line of out.split('\n')) {
+        if (line.startsWith('+++ ')) { file = line.startsWith('+++ b/') ? line.slice(6).replace(/^"(.*)"$/, '$1') : null; continue; }
+        if (file && line.startsWith('+')) added.set(file, `${added.get(file) || ''}${line.slice(1)}\n`);
+      }
+      for (const [p, text] of added) {
+        const what = secretIn(text);
+        if (what) issues.push({ kind: 'secret', path: p, files: [p], detail: `the new lines look like they contain ${what}`, ignore: null, severe: true });
+      }
+    }
+    for (const b of builds.values()) { b.detail = `${b.files.length} file${b.files.length === 1 ? '' : 's'} of ${b.detail}`; issues.push(b); }
+    return issues;
+  },
+
+  // Adds lines to the repo's .gitignore (skipping ones it already has).
+  async ignorePatterns(repo, patterns) {
+    const gi = path.join(repo, '.gitignore');
+    let existing = '';
+    try { existing = fs.readFileSync(gi, 'utf8'); } catch {}
+    const have = new Set(existing.split(/\r?\n/));
+    const add = [...new Set(patterns)].filter((p) => p && !have.has(p));
+    if (!add.length) return false;
+    const sep = existing && !existing.endsWith('\n') ? '\n' : '';
+    fs.appendFileSync(gi, `${sep}${add.join('\n')}\n`);
+    return true;
   },
 
   async ignore(repo, file) {
@@ -1114,9 +1238,9 @@ const firstLine = (m) => (m.includes('\n') ? m.split('\n')[0] + ' …' : m);
 const OP_CMD = { merge: 'merge', rebase: 'rebase', 'cherry-pick': 'cherry-pick', revert: 'revert' };
 
 const plans = {
-  async commit(repo, { message, paths, all, amend = false, partial = null }) {
+  async commit(repo, { message, paths, all, amend = false, partial = null, allowEmpty = false }) {
     const st = await ops.status(repo);
-    const a = amend ? ['--amend'] : [];
+    const a = [...(amend ? ['--amend'] : []), ...(allowEmpty ? ['--allow-empty'] : [])];
     const what = amend ? 'Add to your last commit and replace its message (instead of making a new commit).' : 'Save a snapshot with your message. It stays on your computer until you Send.';
     const some = Object.keys(partial || {});
     if (some.length) {
@@ -1261,15 +1385,17 @@ const plans = {
   },
   clone: (url, parent) => [step(['clone', url.trim()], `Download a full copy of the repo into a new folder inside ${parent}.`)],
   init: () => [step(['init'], 'Start tracking this folder with git (creates the hidden .git folder). Your files are not changed.')],
-  setupRepo: (folder, { branch = 'main', gitignore = null, message = '', remote = '' } = {}) => {
+  setupRepo: (folder, { branch = 'main', gitignore = null, message = '', remote = '', commit = true } = {}) => {
     const b = (branch || 'main').trim();
     const url = (remote || '').trim();
     const addIgnore = gitignore && GITIGNORES[gitignore] && !fs.existsSync(path.join(folder, '.gitignore'));
     return [
       step(['init', '-b', b], `Start tracking this folder with git, on a branch called ${b}. Your files are not changed.`),
       ...(addIgnore ? [info(`Write a .gitignore file (${GITIGNORES[gitignore].label}) so build output, downloaded packages and editor files are left out.`)] : []),
-      step(['add', '-A'], 'Include every file in the folder (except what .gitignore leaves out).'),
-      step(['commit', '--allow-empty', '-m', (message || '').trim() || 'Initial commit'], 'Save them as the first snapshot (commit).'),
+      ...(commit ? [
+        step(['add', '-A'], 'Include every file in the folder (except what .gitignore leaves out).'),
+        step(['commit', '--allow-empty', '-m', (message || '').trim() || 'Initial commit'], 'Save them as the first snapshot (commit).'),
+      ] : []),
       ...(url ? [step(['remote', 'add', 'origin', url], 'Remember this URL as the server, under the nickname “origin”.')] : []),
     ];
   },
