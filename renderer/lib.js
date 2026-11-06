@@ -1,5 +1,5 @@
 // Pure helpers shared by the UI (no DOM, no app state), so they can be unit tested.
-// Loaded as a plain script before app.js; also exported for Node when 'module' exists.
+// Loaded as a plain script before the UI scripts (core.js … app.js); also exported for Node when 'module' exists.
 'use strict';
 
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -393,6 +393,47 @@ function workItemFromBranch(branch) {
   return m ? m[1] : null;
 }
 
+// git's reflog lines ("checkout: moving from a to b") in plain English.
+function reflogText(action) {
+  const a = String(action || '');
+  const rules = [
+    [/^commit \(initial\): (.*)/, (m) => `First commit “${m[1]}”`],
+    [/^commit \(amend\): (.*)/, (m) => `Changed the last commit “${m[1]}”`],
+    [/^commit \(merge\): (.*)/, (m) => `Finished a merge “${m[1]}”`],
+    [/^commit: (.*)/, (m) => `Committed “${m[1]}”`],
+    [/^checkout: moving from (\S+) to (\S+)/, (m) => (m[1] === m[2] ? `Switched to ${m[2]}` : `Switched from ${m[1]} to ${m[2]}`)],
+    [/^reset: moving to (.*)/, (m) => `Moved the branch to ${m[1]} (reset / undo)`],
+    [/^merge (\S+): Fast-forward/, (m) => `Brought in ${m[1]} (fast-forward)`],
+    [/^merge (\S+): (.*)/, (m) => `Merged ${m[1]}`],
+    [/^pull\b[^:]*: Fast-forward/, () => 'Got latest from the server'],
+    [/^pull\b[^:]*: (.*)/, (m) => `Got latest from the server (${m[1]})`],
+    [/^rebase(?: -i)? \(finish\): returning to refs\/heads\/(.*)/, (m) => `Finished replaying ${m[1]} (rebase)`],
+    [/^rebase(?: -i)? \(finish\)/, () => 'Finished a rebase'],
+    [/^rebase(?: -i)? \(start\)/, () => 'Started a rebase'],
+    [/^rebase(?: -i)? \(abort\)/, () => 'Cancelled a rebase'],
+    [/^rebase(?: -i)? \((?:pick|reword|edit|squash|fixup)\): (.*)/, (m) => `Replayed “${m[1]}” (rebase)`],
+    [/^cherry-pick: (.*)/, (m) => `Copied “${m[1]}” (cherry-pick)`],
+    [/^revert: (.*)/, (m) => `Reversed a commit: “${m[1]}”`],
+    [/^clone: /, () => 'Downloaded the repo (clone)'],
+    [/^branch: (.*)/, (m) => `Branch: ${m[1]}`],
+  ];
+  for (const [re, fn] of rules) { const m = a.match(re); if (m) return fn(m); }
+  return a;
+}
+
+// A pull request title from a branch name: "feature/1234-login-page" -> "Login page".
+function prTitleFromBranch(branch) {
+  const words = String(branch || '').split('/').pop().replace(/^\d+(?=[-_])/, '').replace(/[-_]+/g, ' ').trim();
+  return words ? words[0].toUpperCase() + words.slice(1) : String(branch || '');
+}
+
+// A pull request's starting title and description from its commits (newest first, as git log gives them).
+function prDraft(branch, commits) {
+  const subjects = (commits || []).map((c) => c.subject).filter((s) => !/^Merge (branch|remote-tracking branch|pull request) /.test(s)).reverse();
+  if (subjects.length === 1) return { title: subjects[0], description: '' };
+  return { title: prTitleFromBranch(branch), description: subjects.map((s) => `- ${s}`).join('\n') };
+}
+
 // Adds "AB#1234" (which Azure DevOps turns into a link to the work item) to a commit message,
 // unless it already mentions it.
 function withWorkItem(message, id) {
@@ -464,5 +505,5 @@ function moveRepo(workspaces, repo, fromId, toId, copy = false) {
 
 if (typeof module !== 'undefined') {
   module.exports = { esc, basename, norm, samePath, plural, timeAgo, parseConflicts, pickLines, myers, diffLines, sideBySide, inlineDiff, toLines, md,
-    langOf, tokenize, highlight, changeRange, parseUnified, pairHunk, lineKeyer, changedLines, partialPatch, workItemFromBranch, withWorkItem, graphRows, fuzzyScore, moveRepo };
+    langOf, tokenize, highlight, changeRange, parseUnified, pairHunk, lineKeyer, changedLines, partialPatch, workItemFromBranch, withWorkItem, reflogText, prTitleFromBranch, prDraft, graphRows, fuzzyScore, moveRepo };
 }

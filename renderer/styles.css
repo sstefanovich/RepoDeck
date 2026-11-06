@@ -607,6 +607,16 @@ pre.raw { font: 12px/1.45 var(--mono); background: var(--panel-2); padding: 8px 
 .field > span { font-size: 12.5px; font-weight: 600; }
 .field .check { font-weight: 400; margin: 3px 0; }
 .row-inline { display: flex; gap: 6px; }
+.server-mode { flex-wrap: wrap; margin-bottom: 10px; }
+.server-mode input { position: absolute; opacity: 0; width: 0; height: 0; }
+.server-mode .seg-btn:has(input:focus-visible) { outline: 2px solid var(--accent, #4c7cf0); outline-offset: 1px; }
+.commit-issues { display: flex; flex-direction: column; gap: 6px; max-height: 50vh; overflow-y: auto; }
+.issue { display: flex; align-items: flex-start; gap: 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; cursor: pointer; }
+.issue.severe { border-color: var(--bad, #d9534f); }
+.issue input { margin-top: 3px; }
+.issue-icon { width: 1.4em; text-align: center; }
+.issue-text { min-width: 0; overflow-wrap: anywhere; }
+.issue-text .hint { display: block; margin: 2px 0 0; }
 .setup-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0 12px; }
 .intro code { word-break: break-all; }
 .choices { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
@@ -687,3 +697,15 @@ body.no-ai [data-action="write-message"],
 body.no-ai [data-action="explain-commit"],
 body.no-ai [data-action="explain-conflict"],
 body.no-ai [data-action="blame-explain"] { display: none !important; }
+.ws-commit-row { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
+.ws-pr-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 4px 0; }
+.ws-pr-row .check { flex: 1 1 260px; margin: 0; }
+.ws-pr-row select { max-width: 180px; }
+.rec-list { display: flex; flex-direction: column; gap: 4px; max-height: 45vh; overflow-y: auto; }
+.rec-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; }
+.rec-row.lost { border-color: var(--bad); }
+.rec-main { flex: 1 1 300px; min-width: 0; display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: baseline; overflow-wrap: anywhere; }
+.rec-what { font-weight: 600; }
+.rec-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.rec-detail { flex-basis: 100%; min-width: 0; }
+.rec-diff { max-height: 300px; overflow: auto; }

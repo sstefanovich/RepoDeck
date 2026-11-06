@@ -50,3 +50,24 @@ test('a plain folder is set up with a .gitignore, a first commit and a server, t
   assert.deepEqual(sb.sh(srv, 'ls-tree', '--name-only', 'main').trim().split('\n').sort(), ['.gitignore', 'package.json']);
   assert.ok(fs.existsSync(path.join(folder, '.git')));
 });
+
+test('the first commit flags secrets and build folders, and leaves them out', async () => {
+  const folder = path.join(sb.root, 'with-secrets');
+  sb.write(folder, 'index.js', 'console.log(1);\n');
+  sb.write(folder, '.env', 'API_KEY=x\n');
+  sb.write(folder, 'node_modules/dep/index.js', '');
+
+  app.run(`setupNewRepo('ui', ${JSON.stringify(folder)});`);
+  await app.waitFor("return /Set up a new repo/.test(document.querySelector('.modal h2')?.textContent)", 'the set-up dialog');
+  await app.run("const s = document.querySelector('.modal [name=gitignore]'); s.value = '';"); // no starter .gitignore
+  await app.click('.modal [data-close=ok]');
+  await app.waitFor("return /Check these before committing/.test(document.querySelector('.modal h2')?.textContent)", 'the check dialog');
+  const flagged = await app.run("return [...document.querySelectorAll('.issue b')].map((b) => b.textContent).sort()");
+  assert.deepEqual(flagged, ['.env', 'node_modules/']);
+  assert.deepEqual(await app.run(LAYOUT_PROBLEMS), []);
+  await app.click('.modal [data-close=ok]');
+  await app.waitFor("return [...document.querySelectorAll('.toast')].some((t) => /Repo set up/.test(t.textContent))", 'the repo to be committed', 20000);
+
+  assert.deepEqual(sb.sh(folder, 'ls-files').trim().split('\n').sort(), ['.gitignore', 'index.js']);
+  assert.equal(fs.readFileSync(path.join(folder, '.gitignore'), 'utf8'), '/.env\nnode_modules/\n');
+});
