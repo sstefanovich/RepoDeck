@@ -21,10 +21,11 @@ Most git tools assume you already know git and that you work in one repo at a ti
 ### Workspaces and tabs
 
 - **Open repo folder** (or drag folders onto the window), or clone one. Group related repos into **workspaces**.
-- **New repo from a folder:** pick (or make) any folder, or open one that isn't a repo yet. One dialog sets it up: the main branch name, a starter `.gitignore` (guessed from the files, e.g. Node, .NET, Python), the first commit, and the URL of an empty repo on GitHub or Azure DevOps (with links to create one). It's then sent to the server. If the server repo was created with a README or licence, RepoDeck offers to combine the two before sending.
+- **New repo from a folder:** pick (or make) any folder, or open one that isn't a repo yet. One dialog sets it up: the main branch name, a starter `.gitignore` (guessed from the files, e.g. Node, .NET, Python), the first commit, and where it goes: paste the URL of an empty repo, or, with a token in Settings, have RepoDeck **create the repo on GitHub** (you or an organisation, private or public) **or in Azure DevOps** (organisation and project). The files are checked before the first commit (see *Check before committing*), then it's sent to the server. *Add server…* on an existing repo offers the same choices. If the server repo was created with a README or licence, RepoDeck offers to combine the two before sending.
 - The sidebar shows each repo's branch, uncommitted changes (●), commits to send (↑) and commits to get (↓).
 - **Drag a repo** in the sidebar onto another workspace to move it there, or hold <kbd>Ctrl</kbd> while dropping to have it in both. The message that follows has an **Undo** button.
 - **Workspace actions** run on every repo at once: check for updates, get latest, send, *New branch in all*, *Switch all to branch*, *Update all from…* (bring `dev` or any branch into every repo, with a per-repo preview of what's coming and one Undo for all of them), *Tidy up branches*, *Open all in VS Code*.
+- **Commit in all…** makes the same commit (summary, description, work item) in every repo with changes, optionally sending each, with one Undo for all. **Pull requests for all…** opens a pull request from each repo's branch with the same title and description, each into its own main branch, mentioning the others.
 - **Search every repo** from the workspace page: commits by message, author or hash (on any branch), and branches by name. Click a commit to open it in the History of the branch it's on.
 - When branches were deleted on the server (their pull requests completed), the workspace page offers to **finish them all** in one go.
 - If your repos are on different branches, a banner says so and offers **Line them up**.
@@ -37,6 +38,7 @@ Most git tools assume you already know git and that you work in one repo at a ti
 - **✦ Write message:** Claude writes the commit message from your ticked changes.
 - **Type buttons** (`feat`, `fix`, `docs`…) and an optional message template.
 - **Amend** the last commit, as long as it hasn't been sent.
+- **Check before committing.** Before a commit goes in, RepoDeck looks for files that usually shouldn't: files of 50 MB or more (GitHub refuses over 100 MB), likely secrets (`.env`, key and certificate files, and tokens, private keys or passwords in the lines being added) and new build or package folders (`node_modules`, `bin`/`obj`, `__pycache__`…). Leave them out with one tick, which also adds them to `.gitignore`, or commit anyway.
 - **Commit only some lines.** Untick single lines, or a whole block, in the diff to leave them out. They stay in your folder as uncommitted changes. A file with some lines left out shows a half-ticked box.
 - **Discard a single block** (↺ on the block's header) instead of the whole file, with Undo. With only some files ticked, **Put ticked on Shelf** sets just those aside.
 - **Azure Boards work items:** the commit box has an *AB#* field, filled in from the number in the branch name (`feature/1234-login` → 1234). The commit message gets `AB#1234`, which links it to the work item.
@@ -61,7 +63,8 @@ After a commit, merge, get latest, update from another branch, reversed commit, 
 - **Update from…** brings in the new commits from any branch you pick, such as `main`, `dev` or a teammate's branch, by **merge** or **rebase**. It shows how many commits you'll get and remembers your choice for each branch. Rebase is turned off once your commits are on the server, because it would rewrite them.
 - **Compare** two branches: what one has that the other doesn't, either *since they split* (what a pull request would show) or the *exact difference*. You get the commits, the changed files with line counts, and each file's diff.
 - **Tidy up** finds branches that are merged, or were deleted on the server after a pull request, and removes them in one go (with Undo).
-- After you **Send** a feature branch, RepoDeck offers to **open a pull request** on GitHub, Azure DevOps, GitLab or Bitbucket.
+- After you **Send** a feature branch, RepoDeck offers a **pull request**. With a GitHub or Azure DevOps token it's created right here: pick the target branch, and the title and description are drafted from your commits (or **✦ Write description** has Claude write them). Unsent commits are sent first, and Azure DevOps pull requests link the work item from the branch name. Without a token (or on GitLab or Bitbucket) the pull request page opens in your browser.
+- **Recover lost work** (repo menu, or Ctrl+K) lists everywhere the repo has been, in plain English, from git's reflog, and highlights commits that are no longer on any branch, after a reset, a deleted branch or a rebase. *Make a branch here* brings one back. It also finds deleted Shelf items and puts them back.
 
 ![Branch switcher dropdown with a search box](docs/screenshots/branch-switcher.png)
 
@@ -90,11 +93,13 @@ There's also **✦ Explain** (Claude describes the clash), a one-click **Open in
 |---|---|
 | ![Conflict resolver with “Yours” and “Incoming” side by side](docs/screenshots/conflict-steps.png) | ![Whole-file comparison with differences highlighted](docs/screenshots/conflict-compare.png) |
 
-### Azure DevOps
+### GitHub and Azure DevOps
 
-- The **Open pull request** link works with Azure DevOps remotes.
-- With a **personal access token** (Settings → Azure DevOps, permission *Code (Read)*), the repo header shows your branch's pull request: reviews (approved, changes asked, rejected) and build results. Hover to see each reviewer; click to open the PR. When the PR is completed, RepoDeck offers to finish the branch.
-- The token is encrypted with Windows' data protection and only used by the app's main process to call Azure DevOps.
+- With a **personal access token** (Settings → GitHub or Azure DevOps), the repo header shows your branch's pull request: reviews (approved, changes asked, rejected) and build or check results. Hover to see each reviewer; click to open the PR. When the PR is completed (merged), RepoDeck offers to finish the branch.
+- The same token lets RepoDeck **create pull requests** and **create new repos** for you (see above).
+- **GitHub token:** a classic token with the `repo` and `read:org` scopes, or a fine-grained one with *Administration*, *Contents* and *Pull requests* (read & write) and *Commit statuses* (read).
+- **Azure DevOps token:** *Code (Read)* is enough for pull request status. To create pull requests and repos, give it *Code (Read & write)* and *Project and Team (Read)*.
+- Tokens are encrypted with Windows' data protection and only used by the app's main process to call GitHub or Azure DevOps.
 - **Work items:** see *Azure Boards work items* above.
 
 ### The Shelf (git stash)
@@ -134,6 +139,7 @@ Ask Claude about your repos in plain English, for example *"Which commits on mai
 - **Progress and Cancel** for clone, fetch, pull and push.
 - **Light, dark, or follow Windows.**
 - **Friendly errors**, with the raw git output and **✦ Ask Claude why** one click away.
+- **Sign in again:** when sending, getting latest, checking or cloning fails because the server refused the login, RepoDeck offers to forget the old login and open the sign-in window (Git Credential Manager), then tries again. If an SSH key isn't accepted, it offers to switch the repo to HTTPS sign-in.
 - **Keyboard friendly:** visible focus, dialogs keep keyboard focus inside them, and screen-reader labels.
 - **Git explained:** a built-in plain-English glossary.
 
@@ -167,14 +173,15 @@ Then click **📂 Open repo folder…** (or drag a folder onto the window). On f
 | Theme | Follow Windows, Light or Dark |
 | Editor | Which editor *Open in…* uses: VS Code, Cursor, or any command |
 | Commits | A summary template (e.g. `ABC-123: `), the quick type buttons, and the Azure Boards work item box |
-| Azure DevOps | A personal access token for pull request status (stored encrypted) |
+| GitHub | A personal access token for pull request status, creating pull requests and repos (stored encrypted) |
+| Azure DevOps | The same for Azure DevOps (stored encrypted) |
 | Preview commands | Always show git commands before running an action |
 | Cherry-pick note | Add “(cherry picked from commit …)” to cherry-picked commits |
 | AI assistant | Claude, or Off to hide the Claude panel and every ✦ button (for people without Claude) |
 | Claude | Path to `claude.exe` (found automatically if empty) and model |
 | Automatic checking | How often to check servers for new commits |
 
-Settings and workspaces are stored in `%APPDATA%\repodeck\config.json`, Claude chats in `chats.json` next to it, and the encrypted Azure DevOps token in `secrets.json`.
+Settings and workspaces are stored in `%APPDATA%\repodeck\config.json`, Claude chats in `chats.json` next to it, and the encrypted GitHub and Azure DevOps tokens in `secrets.json`.
 
 ## Keyboard shortcuts
 
