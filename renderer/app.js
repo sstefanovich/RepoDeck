@@ -413,7 +413,7 @@ async function resultsModal(title, results, note = '') {
     title,
     body: `<ul class="results">${results.map((r) => `<li class="${r.ok ? 'ok' : r.warn ? 'warn' : 'bad'}">
       <span class="ri">${r.ok ? '✓' : r.warn ? '!' : '✕'}</span>
-      <div><b>${esc(basename(r.repo))}</b> — ${esc(r.msg)}${r.raw ? `<details><summary>details</summary><pre class="raw">${esc(r.raw)}</pre></details>` : ''}</div></li>`).join('')}</ul>
+      <div><b>${esc(basename(r.repo))}</b> — ${esc(r.msg)}${r.url ? ` <a href="#" data-url="${esc(r.url)}">Open ↗</a>` : ''}${r.raw ? `<details><summary>details</summary><pre class="raw">${esc(r.raw)}</pre></details>` : ''}</div></li>`).join('')}</ul>
       ${note ? `<p class="hint">${note}</p>` : ''}`,
   });
 }
@@ -784,6 +784,9 @@ function openWorkspace(id) {
       <button class="btn" data-action="ws-fetch" title="git fetch — asks every server what's new, without changing your files">⟳ Check all for updates</button>
       <button class="btn" data-action="ws-pull" title="git pull — downloads new commits into every repo">↓ Get latest for all</button>
       <button class="btn" data-action="ws-push" title="git push — uploads your commits from every repo">↑ Send all</button>
+      <span class="sep"></span>
+      <button class="btn" data-action="ws-commit" title="git commit — the same commit message in several repos">✓ Commit in all…</button>
+      <button class="btn" data-action="ws-prs" title="A pull request from each repo's branch, with the same title and description">⇄ Pull requests for all…</button>
       <span class="sep"></span>
       <button class="btn" data-action="ws-new-branch" title="git switch -c — the same new branch in several repos">⎇ New branch in all…</button>
       <button class="btn" data-action="ws-switch" title="git switch — move every repo to the same branch">⇄ Switch all to branch…</button>
@@ -1423,11 +1426,11 @@ function renderDiff(text, { maxLines = 6000, file = '', picked = null } = {}) {
 // and lets the user leave them out (adding a .gitignore line where that makes sense).
 // Returns { paths, all } to commit (unchanged if nothing was flagged or they chose to go ahead), or null to stop.
 const ISSUE_ICONS = { large: '⚖', secret: '🔑', build: '📦' };
-async function checkBeforeCommit(repo, { paths, all }) {
+async function checkBeforeCommit(repo, { paths, all }, { inRepoName = false } = {}) {
   const issues = await gitRaw('commitCheck', repo, { paths, all }).catch(() => []);
   if (!issues.length) return { paths, all };
   const r = await modal({
-    title: 'Check these before committing',
+    title: inRepoName ? `Check these before committing in ${basename(repo)}` : 'Check these before committing',
     wide: true,
     body: `<p class="intro">Some of these files are usually kept out of a repo. Once a file has been sent to a server it stays in the history, so it's worth a look now.</p>
       <div class="commit-issues">${issues.map((i, n) => `<label class="issue ${i.severe ? 'severe' : ''}">
@@ -2979,6 +2982,162 @@ async function wsPush() {
   if (results) resultsModal('Send — results', results);
 }
 
+// One undo for a commit made in several repos: each goes back to where it was, keeping the changes.
+function recordMultiCommitUndo(label, moved) {
+  if (!moved.length) return;
+  recordUndo({
+    label,
+    repos: moved.map((m) => m.repo),
+    check: async () => {
+      for (const m of moved) { const why = await moveUndoBlocked(m.repo, m.branch, m.after); if (why) return why; }
+      return null;
+    },
+    run: async () => {
+      const res = await forEachRepo('Undoing…', moved.map((m) => m.repo), async (repo) => {
+        const m = moved.find((x) => x.repo === repo);
+        await undoMove(repo, m.before, m.after, true);
+        return { ok: true };
+      });
+      const bad = (res || []).filter((x) => !x.ok);
+      if (bad.length) throw new Error(bad.map((x) => `${basename(x.repo)}: ${x.raw || x.msg}`).join('\n'));
+    },
+  });
+}
+
+// The same commit (message, work item) in several repos: everything changed in each ticked repo.
+async function wsCommit() {
+  const w = currentWs();
+  const ready = (p) => { const st = state.status[p] || {}; return !st.error && !st.missing && !st.detached && !st.conflicted?.length && changedFiles(st).length > 0; };
+  const repos = w.repos.filter(ready);
+  if (!repos.length) { toast('No repo has changes to commit.', 'ok'); return; }
+  const showWi = state.config.settings.workItems !== false;
+  const wi = showWi ? repos.map((p) => workItemFromBranch(state.status[p].branch)).find(Boolean) || '' : '';
+  const r = await modal({
+    title: 'Commit in several repos',
+    wide: true,
+    body: `<div class="field"><span>Commit in</span>${repos.map((p) => {
+        const st = state.status[p];
+        const files = changedFiles(st);
+        return `<label class="check ws-commit-row" title="${esc(files.map((f) => f.path).join('\n'))}"><input type="checkbox" name="repos" data-multi="1" value="${esc(p)}" checked>
+          <b>${esc(basename(p))}</b> <span class="muted small">on ${esc(st.branch)} · ${plural(files.length, 'changed file')}</span></label>`;
+      }).join('')}</div>
+      <label class="field"><span>Summary</span><input name="summary" value="${esc(state.config.settings.commitTemplate || '')}" placeholder="What did you change? e.g. Add the login page"></label>
+      <label class="field"><span>Description (optional)</span><textarea name="body" rows="3"></textarea></label>
+      ${showWi ? `<label class="field"><span>Work item (Azure Boards)</span><input name="workItem" value="${esc(wi)}" inputmode="numeric" placeholder="none"></label>` : ''}
+      <label class="check"><input type="checkbox" name="send"> Send each repo to the server afterwards</label>
+      <p class="hint">Every changed file in each ticked repo is included. To pick single files or lines, commit from that repo's Changes tab.</p>`,
+    buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'ok', label: 'Commit', kind: 'primary' }],
+    init: (el) => {
+      const sum = el.querySelector('[name=summary]');
+      const ok = el.querySelector('[data-close=ok]');
+      const upd = () => { ok.disabled = !sum.value.trim() || !el.querySelector('[name=repos]:checked'); };
+      el.addEventListener('input', upd);
+      el.addEventListener('change', upd);
+      upd();
+    },
+  });
+  const picked = r.values.repos || [];
+  if (r.id !== 'ok' || !picked.length || !r.values.summary?.trim()) return;
+  const v = r.values;
+  const message = withWorkItem(v.body.trim() ? `${v.summary.trim()}\n\n${v.body.trim()}` : v.summary.trim(), v.workItem);
+  // The file check asks per repo, so it runs one repo at a time before anything is committed.
+  const plan = new Map();
+  for (const repo of picked) {
+    const c = await checkBeforeCommit(repo, { paths: null, all: true }, { inRepoName: picked.length > 1 });
+    if (c) plan.set(repo, c);
+  }
+  const skipped = picked.filter((p) => !plan.has(p));
+  const before = Object.fromEntries(await Promise.all([...plan.keys()].map(async (p) => [p, await gitRaw('headOid', p).catch(() => null)])));
+  const results = await forEachRepo('Committing…', [...plan.keys()], async (repo) => {
+    const c = plan.get(repo);
+    await git('commit', repo, { message, paths: c.paths || [], all: c.all });
+    if (!v.send) return { ok: true, msg: `committed to ${state.status[repo]?.branch}` };
+    const p = await git('push', repo).catch((e) => ({ error: e }));
+    if (p.error) return { ok: false, warn: true, msg: `committed, but couldn't send: ${explain(p.error.message) || 'failed'}`, raw: p.error.message };
+    if (p.rejected) return { ok: false, warn: true, msg: 'committed, but the server has newer commits — get latest, then send' };
+    return { ok: true, msg: p.published ? 'committed and branch published' : 'committed and sent' };
+  }, (repo) => ['commit', repo, { message, paths: plan.get(repo).paths || [], all: plan.get(repo).all }]);
+  if (!results) return;
+  for (const repo of plan.keys()) clearPicks(repo);
+  const moved = [];
+  for (const res of results.filter((x) => x.ok || x.warn)) {
+    const after = await gitRaw('headOid', res.repo).catch(() => null);
+    if (after && before[res.repo] && after !== before[res.repo] && !v.send) moved.push({ repo: res.repo, before: before[res.repo], after, branch: state.status[res.repo]?.branch });
+  }
+  recordMultiCommitUndo(`commit “${v.summary.trim()}” in ${plural(moved.length, 'repo')}`, moved);
+  const all = [...results, ...skipped.map((repo) => ({ repo, ok: false, warn: true, msg: 'skipped — cancelled at the file check' }))];
+  resultsModal('Commit in several repos — results', all, moved.length ? 'Changed your mind? <b>↶ Undo…</b> takes the commits back out of every repo, keeping the changes.' : '');
+}
+
+// A pull request from each repo's branch, with the same title and description (one feature across repos).
+async function wsPullRequests() {
+  const w = currentWs();
+  const MAIN = ['main', 'master', 'develop'];
+  const repos = w.repos.filter((p) => { const st = state.status[p] || {}; return st.hasRemote && st.branch && !MAIN.includes(st.branch) && !st.error && !st.missing; });
+  if (!repos.length) { toast('No repo is on a feature branch that is on a server.', 'info'); return; }
+  const rows = await Promise.all(repos.map(async (repo) => {
+    const st = state.status[repo];
+    const info = await api.host.info(repo).then((x) => (x.ok ? x.data : {})).catch(() => ({}));
+    const b = await gitRaw('branches', repo).catch(() => null);
+    const remote = st.upstream?.split('/')[0] || 'origin';
+    const targets = (b?.remote || []).filter((x) => x.remote === remote && x.branch !== st.branch).map((x) => x.branch);
+    const target = [info.defaultBranch, ...MAIN].find((x) => x && targets.includes(x)) || targets[0] || '';
+    const pr = state.prStatus[norm(repo)];
+    const open = pr?.branch === st.branch && pr.status === 'active' ? pr : null;
+    return { repo, st, info, targets, target, open, inApp: !!(info.kind && info.hasToken) };
+  }));
+  const first = rows[0].st.branch;
+  const ado = rows.some((x) => x.info.kind === 'ado');
+  const wi = ado && state.config.settings.workItems !== false ? rows.map((x) => workItemFromBranch(x.st.branch)).find(Boolean) || '' : null;
+  const r = await modal({
+    title: 'Pull requests for several repos',
+    wide: true,
+    body: `<div class="field"><span>Create one in</span>${rows.map((x, i) => `<div class="ws-pr-row">
+        <label class="check"><input type="checkbox" name="repos" data-multi="1" value="${i}" ${x.open || !x.target ? '' : 'checked'} ${x.target ? '' : 'disabled'}>
+          <b>${esc(basename(x.repo))}</b> <span class="muted small">${esc(x.st.branch)}${x.st.ahead || !x.st.upstream ? ` · ${x.st.upstream ? `${plural(x.st.ahead, 'unsent commit')} (sent first)` : 'not on the server yet (published first)'}` : ''}</span></label>
+        <span class="muted small">into</span> <select name="t${i}" aria-label="Target branch for ${esc(basename(x.repo))}">${x.targets.map((t) => `<option ${t === x.target ? 'selected' : ''}>${esc(t)}</option>`).join('') || '<option value="">no other branch</option>'}</select>
+        <span class="tag ${x.open ? 'warn' : x.inApp ? 'ok' : ''}">${x.open ? `has PR #${x.open.id}` : x.inApp ? 'created here' : 'opens in browser'}</span>
+      </div>`).join('')}</div>
+      <label class="field"><span>Title</span><input name="title" value="${esc(prTitleFromBranch(first))}"></label>
+      <label class="field"><span>Description</span><textarea name="description" rows="5" placeholder="What changed and why. Markdown works."></textarea></label>
+      <label class="check"><input type="checkbox" name="mention" checked> Mention the other repos in each description</label>
+      ${wi != null ? `<label class="field"><span>Work item (Azure Boards)</span><input name="workItem" value="${esc(wi)}" inputmode="numeric" placeholder="none"></label>` : ''}
+      <label class="check"><input type="checkbox" name="draft"> Draft (not ready for review yet)</label>
+      ${rows.some((x) => !x.inApp) ? '<p class="hint">Repos marked <i>opens in browser</i> have no token for their server (Settings), so their pull request page opens for you to finish there.</p>' : ''}`,
+    buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'ok', label: 'Create pull requests', kind: 'primary' }],
+  });
+  const picked = (r.values.repos || []).map(Number).map((i) => ({ ...rows[i], target: r.values[`t${i}`] })).filter((x) => x.target);
+  if (r.id !== 'ok' || !picked.length || !r.values.title?.trim()) return;
+  const v = r.values;
+  const others = (repo) => picked.filter((x) => x.repo !== repo).map((x) => basename(x.repo));
+  const describe = (repo) => {
+    const o = others(repo);
+    return [v.description.trim(), v.mention && o.length ? `Part of a change across ${o.length + 1} repos; also see the pull requests in ${o.join(', ')}.` : ''].filter(Boolean).join('\n\n');
+  };
+  const workItems = /^\d+$/.test(String(v.workItem || '').replace(/^AB#/i, '').trim()) ? [String(v.workItem).replace(/^AB#/i, '').trim()] : [];
+  const browser = [];
+  const results = await forEachRepo('Creating pull request…', picked.map((x) => x.repo), async (repo) => {
+    const x = picked.find((y) => y.repo === repo);
+    if (x.st.ahead || !x.st.upstream) {
+      const p = await git('push', repo);
+      if (p.rejected) return { ok: false, warn: true, msg: 'the server has newer commits on this branch — get latest, then try again' };
+    }
+    if (!x.inApp) {
+      const url = await gitRaw('prUrl', repo, x.st.branch).catch(() => null);
+      if (!url) return { ok: false, warn: true, msg: "couldn't work out the pull request page for this server" };
+      browser.push(url);
+      return { ok: true, warn: true, msg: 'opened in your browser to finish there', url };
+    }
+    const res = await api.host.createPr(repo, { source: x.st.branch, target: x.target, title: v.title.trim(), description: describe(repo), draft: v.draft, workItems: x.info.kind === 'ado' ? workItems : [] });
+    if (!res.ok) return { ok: false, msg: res.error };
+    return { ok: true, msg: `pull request #${res.data.id} into ${x.target}`, url: res.data.url };
+  });
+  if (!results) return;
+  for (const url of browser) api.openUrl(url);
+  for (const x of picked) loadPrStatus(x.repo, true);
+  resultsModal('Pull requests — results', results);
+}
+
 // Bring the same branch (dev, main…) into every repo's current branch.
 async function wsUpdateFrom() {
   const w = currentWs();
@@ -3751,7 +3910,7 @@ function paletteCommands() {
     for (const b of state.branches?.local || []) if (!b.current) cmds.push({ label: `Switch to ${b.name}`, hint: `${here} · branch`, run: () => switchBranch(repo, b.name) });
   }
   if (state.view.type === 'workspace') {
-    for (const [label, action] of [['Get latest for all', 'ws-pull'], ['Send all', 'ws-push'], ['New branch in all…', 'ws-new-branch'], ['Switch all to branch…', 'ws-switch'], ['Update all from a branch…', 'ws-update-from'], ['Tidy up branches in all…', 'ws-tidy']]) {
+    for (const [label, action] of [['Get latest for all', 'ws-pull'], ['Send all', 'ws-push'], ['Commit in all…', 'ws-commit'], ['Pull requests for all…', 'ws-prs'], ['New branch in all…', 'ws-new-branch'], ['Switch all to branch…', 'ws-switch'], ['Update all from a branch…', 'ws-update-from'], ['Tidy up branches in all…', 'ws-tidy']]) {
       cmds.push({ label, hint: currentWs()?.name, run: () => actions[action]({ dataset: {} }) });
     }
   }
@@ -4351,6 +4510,8 @@ const actions = {
   'ws-fetch': () => wsFetch(),
   'ws-pull': () => wsPull(),
   'ws-push': () => wsPush(),
+  'ws-commit': () => wsCommit(),
+  'ws-prs': () => wsPullRequests(),
   'ws-new-branch': () => wsNewBranch(),
   'ws-switch': (t) => wsSwitch(t?.dataset?.preset),
   'ws-open-editor': async () => { const r = await api.openInEditor(state.config.settings.editor, currentWs().repos); if (!r.ok) showError("Couldn't open the editor", new Error(r.error)); },

@@ -697,3 +697,7 @@ body.no-ai [data-action="write-message"],
 body.no-ai [data-action="explain-commit"],
 body.no-ai [data-action="explain-conflict"],
 body.no-ai [data-action="blame-explain"] { display: none !important; }
+.ws-commit-row { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
+.ws-pr-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 4px 0; }
+.ws-pr-row .check { flex: 1 1 260px; margin: 0; }
+.ws-pr-row select { max-width: 180px; }
