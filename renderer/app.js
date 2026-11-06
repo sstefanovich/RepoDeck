@@ -1568,20 +1568,26 @@ async function doPush(repo, { quiet = false } = {}) {
 
 async function addRemoteFlow(repo) {
   const st = state.status[repo] || {};
-  const url = await ask('Connect this repo to a server', {
-    label: 'Server URL (from GitHub, Azure DevOps, GitLab…)',
-    placeholder: 'https://github.com/you/project.git',
-    help: 'This repo only exists on your computer. Create an <b>empty</b> repo on GitHub/Azure DevOps first, copy its URL, and paste it here. (This runs <code>git remote add origin &lt;url&gt;</code>.)',
-    okLabel: st.initial ? 'Add server' : 'Add server & send',
+  const r = await modal({
+    title: 'Put this repo on a server',
+    wide: true,
+    body: `<p class="intro">This repo only exists on your computer. Connect it to a repo on GitHub, Azure DevOps, GitLab… so you can send your work there. (This runs <code>git remote add origin &lt;url&gt;</code>.)</p>
+      ${serverFieldsHtml(basename(repo))}`,
+    buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'ok', label: st.initial ? 'Add server' : 'Add server & send', kind: 'primary' }],
+    init: initServerFields,
   });
-  if (!url) return false;
+  if (r.id === 'settings') { await openSettings(); return addRemoteFlow(repo); }
+  if (r.id !== 'ok') return false;
+  let url;
+  try { url = await resolveServer(r.values); } catch (e) { showError("Couldn't create the repo on the server", e); return false; }
+  if (!url) { toast('Paste the server URL first.', 'warn'); return false; }
   try {
     await git('addRemote', repo, url);
     await refreshRepo(repo);
     onStatusChanged([repo]);
-    if (st.initial) { toast('Server added. Make your first commit, then Publish.', 'ok'); return true; }
-    return doPush(repo);
   } catch (e) { showError("Couldn't add the server", e); return false; }
+  if (st.initial) { toast('Server added. Make your first commit, then Publish.', 'ok'); return true; }
+  return publishNewRepo(repo);
 }
 
 async function afterMaybeConflict(repo, r, successMsg) {
@@ -3239,6 +3245,109 @@ async function addRepos(wsId, folders) {
   openRepo(last.path, last.w.id);
 }
 
+// ---------- choosing (or creating) the server repo ----------
+// One block of fields for "where does this repo live": paste a URL, or create an empty repo on GitHub or
+// Azure DevOps with the saved token. serverFieldsHtml + initServerFields go in a modal; resolveServer
+// turns its values into a URL (creating the repo if asked) after the modal closes.
+const safeRepoName = (s) => String(s || '').trim().replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'my-repo';
+
+// Azure DevOps organisations of the repos you already have, to suggest when creating a repo there.
+async function knownAdoOrgs() {
+  const orgs = new Set([state.config.settings.lastServer?.adoOrg].filter(Boolean));
+  const urls = await Promise.all(allRepos().map((p) => gitRaw('remoteUrl', p).catch(() => null)));
+  for (const u of urls) { const m = String(u || '').match(/dev\.azure\.com[:/](?:v3\/)?([^/]+)/i); if (m) orgs.add(m[1]); }
+  return [...orgs];
+}
+
+function serverFieldsHtml(name, { optional = false } = {}) {
+  const last = state.config.settings.lastServer || {};
+  const mode = ['github', 'ado'].includes(last.mode) && state.tokens[last.mode] ? last.mode : 'url';
+  const tokenHint = (svc) => `<p class="hint">To create repos from here, add ${svc} token in <a href="#" data-close="settings">Settings</a>. Or create the repo on the website and paste its URL.</p>`;
+  return `<div class="seg server-mode" role="radiogroup" aria-label="Where the repo goes">
+      ${[['url', 'Paste a URL'], ['github', 'Create on GitHub'], ['ado', 'Create in Azure DevOps']].map(([v, l]) => `<label class="seg-btn"><input type="radio" name="srvMode" value="${v}" ${v === mode ? 'checked' : ''}> ${l}</label>`).join('')}
+    </div>
+    <div class="srv-panel" data-mode="url">
+      <p class="hint">${optional ? 'Leave it empty to keep the repo on your computer for now. ' : ''}Create an <b>empty</b> repo (no README, .gitignore or licence) and paste its URL:
+        <a href="#" data-url="https://github.com/new">GitHub ↗</a> · <a href="#" data-url="https://dev.azure.com/">Azure DevOps ↗</a></p>
+      <label class="field"><span>Server URL</span><input name="remote" placeholder="https://github.com/you/project.git" spellcheck="false"></label>
+    </div>
+    <div class="srv-panel" data-mode="github">
+      ${state.tokens.github ? `<div class="setup-grid">
+          <label class="field"><span>Owner</span><select name="ghOwner"><option value="">Loading…</option></select></label>
+          <label class="field"><span>Repo name</span><input name="ghName" value="${esc(safeRepoName(name))}" spellcheck="false"></label>
+        </div>
+        <label class="check"><input type="checkbox" name="ghPrivate" ${last.ghPrivate === false ? '' : 'checked'}> Private (only people you invite can see it)</label>` : tokenHint('a GitHub')}
+    </div>
+    <div class="srv-panel" data-mode="ado">
+      ${state.tokens.ado ? `<div class="setup-grid">
+          <label class="field"><span>Organisation</span><input name="adoOrg" value="${esc(last.adoOrg || '')}" placeholder="e.g. acme (from dev.azure.com/acme)" list="ado-orgs" spellcheck="false"><datalist id="ado-orgs"></datalist></label>
+          <label class="field"><span>Project</span><select name="adoProject"><option value="">Type the organisation first</option></select></label>
+        </div>
+        <label class="field"><span>Repo name</span><input name="adoName" value="${esc(safeRepoName(name))}" spellcheck="false"></label>` : tokenHint('an Azure DevOps')}
+    </div>`;
+}
+
+function initServerFields(el) {
+  const last = state.config.settings.lastServer || {};
+  const show = () => {
+    const mode = el.querySelector('[name=srvMode]:checked')?.value || 'url';
+    el.querySelectorAll('.srv-panel').forEach((p) => { p.hidden = p.dataset.mode !== mode; });
+    el.querySelectorAll('.server-mode .seg-btn').forEach((b) => b.classList.toggle('active', b.querySelector('input').checked));
+    if (mode === 'github') loadOwners();
+    if (mode === 'ado') loadProjects();
+  };
+  let ownersLoaded = false;
+  const loadOwners = async () => {
+    const sel = el.querySelector('[name=ghOwner]');
+    if (!sel || ownersLoaded) return;
+    ownersLoaded = true;
+    const r = await api.host.githubOwners();
+    sel.innerHTML = r.ok ? r.data.map((o) => `<option value="${esc(o.login)}" ${o.login === last.ghOwner ? 'selected' : ''}>${esc(o.login)}${o.type === 'org' ? ' (organisation)' : ''}</option>`).join('')
+      : `<option value="">Couldn't load: ${esc(r.error)}</option>`;
+  };
+  let projectsFor = null;
+  const loadProjects = async () => {
+    const org = el.querySelector('[name=adoOrg]');
+    const sel = el.querySelector('[name=adoProject]');
+    if (!org || !sel || !org.value.trim() || projectsFor === org.value.trim()) return;
+    projectsFor = org.value.trim();
+    sel.innerHTML = '<option value="">Loading…</option>';
+    const r = await api.host.adoProjects(projectsFor);
+    if (projectsFor !== org.value.trim()) return; // typed on meanwhile
+    sel.innerHTML = r.ok && r.data.length ? r.data.map((p) => `<option ${p.name === last.adoProject ? 'selected' : ''}>${esc(p.name)}</option>`).join('')
+      : `<option value="">${r.ok ? 'No projects found' : `Couldn't load: ${esc(r.error)}`}</option>`;
+  };
+  el.querySelectorAll('[name=srvMode]').forEach((i) => i.addEventListener('change', show));
+  const orgInput = el.querySelector('[name=adoOrg]');
+  orgInput?.addEventListener('change', loadProjects);
+  if (orgInput) knownAdoOrgs().then((orgs) => {
+    el.querySelector('#ado-orgs').innerHTML = orgs.map((o) => `<option value="${esc(o)}">`).join('');
+    if (!orgInput.value && orgs[0]) { orgInput.value = orgs[0]; if (el.querySelector('[name=srvMode]:checked')?.value === 'ado') loadProjects(); }
+  });
+  show();
+}
+
+// -> the server URL ('' for none), creating the repo first when asked. Throws if creating fails.
+async function resolveServer(v) {
+  const mode = v.srvMode || 'url';
+  const s = state.config.settings;
+  if (mode === 'url') return (v.remote || '').trim();
+  let r;
+  if (mode === 'github') {
+    if (!v.ghOwner) throw new Error('Pick who the repo belongs to.');
+    r = await api.host.createRepo('github', { owner: v.ghOwner, name: safeRepoName(v.ghName), isPrivate: v.ghPrivate });
+    s.lastServer = { ...s.lastServer, mode, ghOwner: v.ghOwner, ghPrivate: v.ghPrivate };
+  } else {
+    if (!v.adoOrg?.trim() || !v.adoProject) throw new Error('Pick the organisation and project.');
+    r = await api.host.createRepo('ado', { org: v.adoOrg.trim(), project: v.adoProject, name: (v.adoName || '').trim() || 'my-repo' });
+    s.lastServer = { ...s.lastServer, mode, adoOrg: v.adoOrg.trim(), adoProject: v.adoProject };
+  }
+  if (!r.ok) throw Object.assign(new Error(r.error), { code: r.code });
+  saveConfig();
+  toast(`Created ${r.data.name} on ${mode === 'github' ? 'GitHub' : 'Azure DevOps'}.`, 'ok');
+  return r.data.cloneUrl;
+}
+
 // ---------- set up a new repo from a plain folder ----------
 async function newRepo(wsId) {
   const folder = await api.pickFolder('Choose (or make) the folder for your new repo');
@@ -3260,7 +3369,6 @@ async function setupNewRepo(wsId, folder, { notRepo = false } = {}) {
     return null;
   }
   const ws = state.config.workspaces;
-  const urlHint = (host) => host === 'github' ? 'https://github.com/you/project.git' : 'https://dev.azure.com/org/project/_git/repo';
   const r = await modal({
     title: 'Set up a new repo',
     wide: true,
@@ -3277,26 +3385,24 @@ async function setupNewRepo(wsId, folder, { notRepo = false } = {}) {
       </div>
       <label class="field"><span>First commit message</span><input name="message" value="Initial commit"></label>
       <h3>Put it on a server <span class="muted small">(optional — you can do this later with Send)</span></h3>
-      <p class="hint">Create an <b>empty</b> repo${info.name ? ` (e.g. named <b>${esc(info.name)}</b>)` : ''} — no README, .gitignore or licence — then paste its URL here.
-        <a href="#" data-new-on="github">Create one on GitHub ↗</a> · <a href="#" data-new-on="ado">Create one in Azure DevOps ↗</a></p>
-      <label class="field"><span>Server URL</span><input name="remote" placeholder="${urlHint('github')}  or  ${urlHint('ado')}" spellcheck="false"></label>
+      ${serverFieldsHtml(info.name, { optional: true })}
       <label class="check"><input type="checkbox" name="send" checked> Send it to the server straight away</label>
       ${ws.length > 1 ? `<label class="field"><span>Add to workspace</span><select name="ws">${ws.map((w) => `<option value="${w.id}" ${(wsId || state.view.ws) === w.id ? 'selected' : ''}>${esc(w.name)}</option>`).join('')}</select></label>` : ''}`,
     buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'ok', label: 'Set up repo', kind: 'primary' }],
     init: (el) => {
-      el.querySelectorAll('[data-new-on]').forEach((a) => a.addEventListener('click', (e) => {
-        e.preventDefault();
-        api.openUrl(a.dataset.newOn === 'github' ? 'https://github.com/new' : 'https://dev.azure.com/');
-      }));
+      initServerFields(el);
       const branch = el.querySelector('[name=branch]');
       const ok = el.querySelector('[data-close=ok]');
       branch.addEventListener('input', () => { ok.disabled = !branch.value.trim(); });
     },
   });
+  if (r.id === 'settings') { await openSettings(); return setupNewRepo(wsId, folder, { notRepo }); }
   if (r.id !== 'ok') return null;
   const v = r.values;
-  const remote = v.remote.trim();
   const target = v.ws || wsId;
+  // Create the server repo first: if that fails, nothing has changed in the folder yet.
+  let remote;
+  try { remote = await resolveServer(v); } catch (e) { showError("Couldn't create the repo on the server", e); return null; }
   try {
     // The first commit is made below, after the files are checked.
     await git('setupRepo', folder, { branch: v.branch, gitignore: v.gitignore || null, message: v.message, remote, commit: false });
