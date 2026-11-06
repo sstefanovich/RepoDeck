@@ -111,8 +111,8 @@ const state = {
   previewOpen: false, // a command preview is showing (so nothing is running yet)
   progress: {},       // repo (or 'clone') -> { text, percent } for long operations
   undos: [],          // recent actions that can be undone, newest first (see recordUndo)
-  prStatus: {},       // norm(repo) -> pull request info from Azure DevOps, for the current branch
-  adoToken: false,    // an Azure DevOps token is saved (the token itself stays in the main process)
+  prStatus: {},       // norm(repo) -> pull request info from GitHub or Azure DevOps, for the current branch
+  tokens: { ado: false, github: false }, // which tokens are saved (the tokens themselves stay in the main process)
   workItem: {},       // "repo|branch" -> work item number typed in the commit box
   wsQuery: '',        // workspace page: search text
   branchFilter: '',   // Branches tab: filter text
@@ -262,6 +262,9 @@ function modal({ title, body = '', buttons = [{ id: 'ok', label: 'OK', kind: 'pr
       }
     }
     el.addEventListener('click', (e) => {
+      // Links in dialogs open in the browser: <a href="#" data-url="https://…">.
+      const link = e.target.closest('a[data-url]');
+      if (link) { e.preventDefault(); api.openUrl(link.dataset.url); return; }
       const b = e.target.closest('[data-close]');
       if (b && !b.disabled) close(b.dataset.close);
       else if (e.target === el) close('cancel');
@@ -1532,7 +1535,8 @@ async function doPull(repo) {
   } catch (e) { showError("Couldn't get the latest", e, { repo, retry: () => doPull(repo) }); return false; }
 }
 
-async function doPush(repo) {
+// quiet: no message on success (the caller carries on, e.g. to create a pull request).
+async function doPush(repo, { quiet = false } = {}) {
   try {
     const r = await busy(repo, 'Sending…', () => git('push', repo));
     if (r.rejected) {
@@ -1541,16 +1545,17 @@ async function doPush(repo) {
       ]);
       if (c === 'pull' && (await doPull(repo))) {
         const st = state.status[repo];
-        if (!st.conflicted?.length && !st.op) return doPush(repo);
+        if (!st.conflicted?.length && !st.op) return doPush(repo, { quiet });
       }
       return false;
     }
     loadPrStatus(repo, true);
+    if (quiet) return true;
     const msg = r.published ? 'Branch published to the server.' : 'Sent to the server.';
     // The natural next step after sending a feature branch is a pull request.
     if (r.branch && !['main', 'master', 'develop'].includes(r.branch)) {
       const url = await gitRaw('prUrl', repo, r.branch).catch(() => null);
-      if (url) { toast(msg, 'ok', { label: 'Open pull request', fn: () => api.openUrl(url) }); return true; }
+      if (url) { toast(msg, 'ok', { label: 'Pull request…', fn: () => openPullRequest(repo) }); return true; }
     }
     toast(msg, 'ok');
     return true;
@@ -2249,18 +2254,112 @@ async function loadCommitDetails() {
     <div class="diff-scroll">${renderDiff(d.diff)}</div>`;
 }
 
-// ---------- Azure DevOps pull request status ----------
+// ---------- creating a pull request ----------
+// With a token for the repo's server, the pull request is created here; otherwise its page opens in the browser.
+async function openPullRequest(repo) {
+  closePopover();
+  let st = state.status[repo] || {};
+  const inBrowser = async () => {
+    const url = await gitRaw('prUrl', repo, st.branch).catch(() => null);
+    if (url) api.openUrl(url); else toast("Couldn't work out the pull request page for this server.", 'warn');
+  };
+  if (!st.branch) { toast("You're not on a branch.", 'warn'); return; }
+  const info = await api.host.info(repo);
+  if (!info.ok || !info.data.kind || !info.data.hasToken) return inBrowser();
+  if (!st.upstream || st.ahead) {
+    const c = await choose(st.upstream ? 'Send your commits first?' : 'Publish the branch first?',
+      `<p>${st.upstream ? `${plural(st.ahead, 'commit')} on <b>${esc(st.branch)}</b> ${st.ahead === 1 ? "isn't" : "aren't"} on the server yet, so the pull request wouldn't include ${st.ahead === 1 ? 'it' : 'them'}.` : `<b>${esc(st.branch)}</b> isn't on the server yet. A pull request needs the branch there.`}</p>`,
+      [{ id: 'send', label: st.upstream ? 'Send, then create the pull request' : 'Publish, then create the pull request', kind: 'primary' }]);
+    if (c !== 'send') return;
+    if (!(await doPush(repo, { quiet: true }))) return;
+    st = state.status[repo];
+  }
+  return createPrDialog(repo, info.data);
+}
+
+async function createPrDialog(repo, info) {
+  const st = state.status[repo];
+  const remote = st.upstream.split('/')[0];
+  const br = await gitRaw('branches', repo).catch(() => null);
+  const targets = (br?.remote || []).filter((b) => b.remote === remote && b.branch !== st.branch).map((b) => b.branch);
+  const target0 = [info.defaultBranch, 'main', 'master', 'develop'].find((b) => b && targets.includes(b)) || targets[0];
+  if (!target0) { toast('There is no other branch on the server to merge into.', 'warn'); return; }
+  const compareTo = (target) => gitRaw('compare', repo, `${remote}/${target}`, 'HEAD').catch(() => null);
+  let cmp = await compareTo(target0);
+  const draft = prDraft(st.branch, cmp?.commits);
+  const summary = (c) => (c ? `${plural(c.commits.length, 'commit')}, ${plural(c.files.length, 'file')} changed` : "Couldn't compare the branches.");
+  const ado = info.kind === 'ado';
+  const wi = ado && state.config.settings.workItems !== false ? workItemFromBranch(st.branch) : null;
+  let descTouched = false;
+  const r = await modal({
+    title: `Create a pull request on ${ado ? 'Azure DevOps' : 'GitHub'}`,
+    wide: true,
+    body: `<div class="setup-grid">
+        <div class="field"><span>From</span><div><b>${esc(st.branch)}</b></div></div>
+        <label class="field"><span>Into</span><select name="target">${targets.map((b) => `<option ${b === target0 ? 'selected' : ''}>${esc(b)}</option>`).join('')}</select></label>
+      </div>
+      <p class="hint" id="pr-summary">${summary(cmp)}</p>
+      <label class="field"><span>Title</span><input name="title" value="${esc(draft.title)}"></label>
+      <label class="field"><span class="row-inline">Description${aiOn() ? ' <button class="btn small ghost" type="button" id="pr-write">✦ Write description</button>' : ''}</span>
+        <textarea name="description" rows="8" placeholder="What changed and why. Markdown works.">${esc(draft.description)}</textarea></label>
+      ${ado ? `<label class="field"><span>Work item (Azure Boards)</span><input name="workItem" value="${esc(wi || '')}" inputmode="numeric" placeholder="none"></label>` : ''}
+      <label class="check"><input type="checkbox" name="draft"> Draft (not ready for review yet)</label>`,
+    buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'web', label: 'Open in browser instead' }, { id: 'ok', label: 'Create pull request', kind: 'primary' }],
+    init: (el) => {
+      const desc = el.querySelector('[name=description]');
+      const title = el.querySelector('[name=title]');
+      const ok = el.querySelector('[data-close=ok]');
+      desc.addEventListener('input', () => { descTouched = true; });
+      title.addEventListener('input', () => { ok.disabled = !title.value.trim(); });
+      el.querySelector('[name=target]').addEventListener('change', async (e) => {
+        el.querySelector('#pr-summary').textContent = 'Comparing…';
+        cmp = await compareTo(e.target.value);
+        el.querySelector('#pr-summary').textContent = summary(cmp);
+        if (!descTouched) desc.value = prDraft(st.branch, cmp?.commits).description;
+      });
+      el.querySelector('#pr-write')?.addEventListener('click', async (e) => {
+        const b = e.currentTarget;
+        const target = el.querySelector('[name=target]').value;
+        b.disabled = true;
+        b.innerHTML = '<span class="spinner sm"></span> Writing…';
+        try {
+          const commits = (cmp?.commits || []).map((c) => `- ${c.subject}`).join('\n');
+          const files = (cmp?.files || []).slice(0, 80).map((f) => `${f.code} ${f.path}${f.add != null ? ` (+${f.add} -${f.del})` : ''}`).join('\n');
+          const prompt = `Write a pull request title and description for merging the branch ${st.branch} into ${target}.\nLook at the changes with: git diff ${remote}/${target}...HEAD\n\nCommits:\n${commits}\n\nFiles:\n${files}\n\nReply with ONLY: the title (under 72 characters) on the first line, a blank line, then the description in Markdown: one or two sentences on what and why, then a short bullet list of the main changes. No preamble, no code fences around the whole reply.`;
+          const res = await api.claude.oneShot(repo, prompt);
+          if (!res.ok) throw new Error(res.error === 'NOT_FOUND' ? "Couldn't find the Claude Code app (claude.exe). Set its location in Settings → Claude." : res.error);
+          const [t, ...rest] = res.text.trim().split('\n');
+          title.value = t.replace(/^#+\s*|^Title:\s*/i, '').trim();
+          desc.value = rest.join('\n').trim();
+          descTouched = true;
+          ok.disabled = !title.value.trim();
+        } catch (err) { toast(err.message, 'bad'); }
+        finally { b.disabled = false; b.textContent = '✦ Write description'; }
+      });
+    },
+  });
+  if (r.id === 'web') { const url = await gitRaw('prUrl', repo, st.branch).catch(() => null); if (url) api.openUrl(url); return; }
+  if (r.id !== 'ok' || !r.values.title.trim()) return;
+  const v = r.values;
+  const workItems = ado && /^\d+$/.test((v.workItem || '').replace(/^AB#/i, '').trim()) ? [v.workItem.replace(/^AB#/i, '').trim()] : [];
+  const res = await busy(repo, 'Creating pull request…', () => api.host.createPr(repo, { source: st.branch, target: v.target, title: v.title.trim(), description: v.description.trim(), draft: v.draft, workItems }));
+  if (!res.ok) { showError("Couldn't create the pull request", Object.assign(new Error(res.error), { code: res.code })); return; }
+  toast(`Pull request #${res.data.id} created.`, 'ok', { label: 'Open it', fn: () => api.openUrl(res.data.url) });
+  loadPrStatus(repo, true);
+}
+
+// ---------- pull request status (GitHub, Azure DevOps) ----------
 // Fetched by the main process (which holds the token); refreshed at most every 5 minutes per branch
 // unless `force` (after Check for updates or Send).
 const prLoaded = {}; // norm(repo) -> { branch, time }
 async function loadPrStatus(repo, force = false) {
   const st = state.status[repo] || {};
-  if (!state.adoToken || !repo || !st.branch || !st.hasRemote) return;
+  if (!(state.tokens.ado || state.tokens.github) || !repo || !st.branch || !st.hasRemote) return;
   const k = norm(repo);
   const last = prLoaded[k];
   if (!force && last && last.branch === st.branch && Date.now() - last.time < 5 * 60000) return;
   prLoaded[k] = { branch: st.branch, time: Date.now() };
-  const r = await api.ado.prStatus(repo, st.branch);
+  const r = await api.host.prStatus(repo, st.branch);
   const data = r.ok ? r.data : { error: r.error, code: r.code };
   if (data.supported === false || data.noToken) delete state.prStatus[k];
   else state.prStatus[k] = { ...data, branch: st.branch };
@@ -3342,10 +3441,17 @@ async function openSettings() {
       <label class="field"><span>Start every commit summary with (optional)</span><input name="commitTemplate" value="${esc(s.commitTemplate || '')}" placeholder="e.g. ABC-123: "></label>
       <label class="field"><span>Quick type buttons above the summary (space-separated; empty to hide)</span><input name="commitPrefixes" value="${esc(s.commitPrefixes ?? 'feat fix docs refactor test chore')}"></label>
       <label class="check"><input type="checkbox" name="workItems" ${s.workItems !== false ? 'checked' : ''}> Show a work item box (AB#) for Azure Boards, filled in from the branch name (e.g. feature/1234-login)</label>
+      <h3>GitHub</h3>
+      <p class="hint">With a personal access token, repos on GitHub show their pull request's reviews and checks next to the branch, and you can create pull requests and new repos from RepoDeck.
+        Create a <a href="#" data-url="https://github.com/settings/tokens/new?scopes=repo,read:org&amp;description=RepoDeck">classic token</a> with the <b>repo</b> and <b>read:org</b> scopes
+        (or a fine-grained one with <b>Administration</b>, <b>Contents</b> and <b>Pull requests</b> read &amp; write, and <b>Commit statuses</b> read). It's stored encrypted on this computer and only sent to GitHub.</p>
+      <label class="field"><span>GitHub token</span><input name="githubToken" type="password" autocomplete="off" placeholder="${state.tokens.github ? 'Saved — type a new one to replace it' : 'Paste your token'}"></label>
+      ${state.tokens.github ? '<label class="check"><input type="checkbox" name="githubForget"> Forget the saved GitHub token</label>' : ''}
       <h3>Azure DevOps</h3>
-      <p class="hint">With a personal access token, repos on Azure DevOps show their pull request's reviews and build next to the branch. Create one in Azure DevOps under <b>User settings → Personal access tokens</b> with the <b>Code (Read)</b> permission. It's stored encrypted on this computer and only sent to Azure DevOps.</p>
-      <label class="field"><span>Personal access token</span><input name="adoToken" type="password" autocomplete="off" placeholder="${state.adoToken ? 'Saved — type a new one to replace it' : 'Paste your token'}"></label>
-      ${state.adoToken ? '<label class="check"><input type="checkbox" name="adoForget"> Forget the saved token</label>' : ''}
+      <p class="hint">With a personal access token, repos on Azure DevOps show their pull request's reviews and build next to the branch. Create one in Azure DevOps under <b>User settings → Personal access tokens</b>.
+        <b>Code (Read)</b> is enough to see pull requests; to create pull requests and new repos from RepoDeck, give it <b>Code (Read &amp; write)</b> and <b>Project and Team (Read)</b>. It's stored encrypted on this computer and only sent to Azure DevOps.</p>
+      <label class="field"><span>Azure DevOps token</span><input name="adoToken" type="password" autocomplete="off" placeholder="${state.tokens.ado ? 'Saved — type a new one to replace it' : 'Paste your token'}"></label>
+      ${state.tokens.ado ? '<label class="check"><input type="checkbox" name="adoForget"> Forget the saved Azure DevOps token</label>' : ''}
       <h3>Seeing what happens</h3>
       <label class="check"><input type="checkbox" name="preview" ${s.previewCommands ? 'checked' : ''}> Show me the git commands before running any action</label>
       <p class="hint">You can always hold <b>Shift</b> while clicking a button to preview just that one action.</p>
@@ -3372,10 +3478,15 @@ async function openSettings() {
   s.commitTemplate = v.commitTemplate;
   s.commitPrefixes = v.commitPrefixes.trim();
   s.workItems = v.workItems;
-  if (v.adoToken.trim() || v.adoForget) {
-    const t = await api.ado.setToken(v.adoForget ? '' : v.adoToken.trim());
-    if (!t.ok) showError("Couldn't save the Azure DevOps token", new Error(t.error));
-    state.adoToken = await api.ado.hasToken();
+  let tokensChanged = false;
+  for (const [kind, name] of [['github', 'GitHub'], ['ado', 'Azure DevOps']]) {
+    if (!v[`${kind}Token`].trim() && !v[`${kind}Forget`]) continue;
+    const t = await api.host.setToken(kind, v[`${kind}Forget`] ? '' : v[`${kind}Token`].trim());
+    if (!t.ok) showError(`Couldn't save the ${name} token`, new Error(t.error));
+    tokensChanged = true;
+  }
+  if (tokensChanged) {
+    state.tokens = await api.host.tokens();
     state.prStatus = {};
     for (const k of Object.keys(prLoaded)) delete prLoaded[k];
     loadPrStatus(currentRepo(), true);
@@ -4087,12 +4198,7 @@ const actions = {
     if (t.dataset.name === st.branch) return;
     switchBranch(t.dataset.repo, t.dataset.name, t.dataset.remote || undefined);
   },
-  'open-pr': async (t) => {
-    closePopover();
-    const repo = t.dataset.repo || currentRepo();
-    const url = await gitRaw('prUrl', repo, state.status[repo]?.branch).catch(() => null);
-    if (url) api.openUrl(url); else toast("Couldn't work out the pull request page for this server.", 'warn');
-  },
+  'open-pr': (t) => openPullRequest(t.dataset.repo || currentRepo()),
   'add-remote': (t) => addRemoteFlow(t.dataset.repo || currentRepo()),
   'cancel-op': async (t) => { await gitRaw('cancel', t.dataset.repo); toast('Cancelling…', 'info'); },
   'cancel-clone': () => gitRaw('cancel', 'clone'),
@@ -4379,7 +4485,7 @@ function updateWatchers() {
 
 async function init() {
   state.config = await api.getConfig();
-  state.adoToken = await api.ado.hasToken().catch(() => false);
+  state.tokens = await api.host.tokens().catch(() => ({ ado: false, github: false }));
   api.onLog(addLog);
   api.claude.onEvent(onClaudeEvent);
   api.onProgress((p) => {

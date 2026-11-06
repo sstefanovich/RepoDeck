@@ -6,6 +6,7 @@ const { spawn } = require('child_process');
 const git = require('./src/git');
 const { ClaudeSession, findClaude, oneShot } = require('./src/claude');
 const ado = require('./src/ado');
+const github = require('./src/github');
 
 let win;
 
@@ -157,28 +158,63 @@ ipcMain.handle('git', async (_e, op, ...args) => {
   catch (err) { return { ok: false, error: err.message, code: err.code }; }
 });
 
-// ---------- Azure DevOps (pull request status) ----------
-// The personal access token is encrypted with Windows' own data protection (safeStorage) and
-// kept in its own file; it is only ever used here, never sent to the page.
+// ---------- GitHub and Azure DevOps (pull requests, new repos) ----------
+// Personal access tokens are encrypted with Windows' own data protection (safeStorage) and kept in
+// their own file; they are only ever used here, never sent to the page.
 const secretsFile = () => path.join(app.getPath('userData'), 'secrets.json');
-function readAdoToken() {
-  try {
-    const s = JSON.parse(fs.readFileSync(secretsFile(), 'utf8'));
-    return s.adoToken && safeStorage.isEncryptionAvailable() ? safeStorage.decryptString(Buffer.from(s.adoToken, 'base64')) : '';
-  } catch { return ''; }
+const TOKEN_KEYS = { ado: 'adoToken', github: 'githubToken' };
+function readSecrets() { try { return JSON.parse(fs.readFileSync(secretsFile(), 'utf8')); } catch { return {}; } }
+function readToken(kind) {
+  const enc = readSecrets()[TOKEN_KEYS[kind]];
+  try { return enc && safeStorage.isEncryptionAvailable() ? safeStorage.decryptString(Buffer.from(enc, 'base64')) : ''; } catch { return ''; }
 }
-ipcMain.handle('ado:hasToken', () => !!readAdoToken());
-ipcMain.handle('ado:setToken', (_e, token) => {
+const HOSTS = { ado, github };
+// Which service a repo is on (from its origin URL), with that service's token.
+async function hostOf(repo) {
+  const remoteUrl = await git.ops.remoteUrl(repo);
+  const kind = !remoteUrl ? null : ado.parseRemote(remoteUrl) ? 'ado' : github.parseRemote(remoteUrl) ? 'github' : null;
+  return { kind, remoteUrl, token: kind ? readToken(kind) : '' };
+}
+const handle = (channel, fn) => ipcMain.handle(channel, async (_e, ...args) => {
+  try { return { ok: true, data: await fn(...args) }; } catch (err) { return { ok: false, error: err.message, code: err.code }; }
+});
+
+ipcMain.handle('tokens:has', () => ({ ado: !!readToken('ado'), github: !!readToken('github') }));
+ipcMain.handle('tokens:set', (_e, kind, token) => {
+  if (!TOKEN_KEYS[kind]) return { ok: false, error: 'Unknown service.' };
   const t = String(token || '').trim();
   if (t && !safeStorage.isEncryptionAvailable()) return { ok: false, error: "Windows can't encrypt the token on this computer, so it wasn't saved." };
-  fs.writeFileSync(secretsFile(), JSON.stringify(t ? { adoToken: safeStorage.encryptString(t).toString('base64') } : {}));
+  const s = readSecrets();
+  if (t) s[TOKEN_KEYS[kind]] = safeStorage.encryptString(t).toString('base64'); else delete s[TOKEN_KEYS[kind]];
+  fs.writeFileSync(secretsFile(), JSON.stringify(s));
   return { ok: true };
 });
-ipcMain.handle('ado:prStatus', async (_e, repo, branch) => {
-  try {
-    const remoteUrl = await git.ops.remoteUrl(repo);
-    return { ok: true, data: await ado.prStatus({ remoteUrl, branch, token: readAdoToken() }) };
-  } catch (err) { return { ok: false, error: err.message, code: err.code }; }
+handle('host:prStatus', async (repo, branch) => {
+  const h = await hostOf(repo);
+  if (!h.kind) return { supported: false };
+  return { ...(await HOSTS[h.kind].prStatus({ remoteUrl: h.remoteUrl, branch, token: h.token })), host: h.kind };
+});
+// What the UI needs to offer creating a pull request in the app: { kind, hasToken, defaultBranch }.
+handle('host:info', async (repo) => {
+  const h = await hostOf(repo);
+  if (!h.kind || !h.token) return { kind: h.kind, hasToken: !!h.token };
+  const info = await HOSTS[h.kind].repoInfo({ remoteUrl: h.remoteUrl, token: h.token }).catch(() => null);
+  return { kind: h.kind, hasToken: true, defaultBranch: info?.defaultBranch || null };
+});
+// opts: { source, target, title, description, draft, workItems }
+handle('host:createPr', async (repo, opts) => {
+  const h = await hostOf(repo);
+  if (!h.kind || !h.token) throw new Error('No token is saved for this server.');
+  if (h.kind === 'github') return github.createPr({ remoteUrl: h.remoteUrl, token: h.token, head: opts.source, base: opts.target, title: opts.title, body: opts.description, draft: opts.draft });
+  return ado.createPr({ remoteUrl: h.remoteUrl, token: h.token, ...opts });
+});
+handle('host:githubOwners', () => github.owners({ token: readToken('github') }));
+handle('host:adoProjects', (org) => ado.projects({ org, token: readToken('ado') }));
+// opts: github { owner, name, isPrivate, description } | ado { org, project, name }
+handle('host:createRepo', (kind, opts) => {
+  const token = readToken(kind);
+  if (!token) throw new Error('No token is saved for this service.');
+  return HOSTS[kind].createRepo({ ...opts, token });
 });
 
 // ---------- Claude chat panel (Claude Code CLI) ----------

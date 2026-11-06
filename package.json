@@ -13,7 +13,7 @@
     "setup:x64": "electron-builder --win nsis:x64 --publish never -c.nsis.artifactName=${productName}-Setup-${version}-x64.${ext}",
     "dist": "npm run setup",
     "pack": "electron-builder --win --dir --publish never",
-    "check": "node --check main.js && node --check preload.js && node --check src/git.js && node --check src/claude.js && node --check src/ado.js && node --check renderer/lib.js && node --check renderer/app.js"
+    "check": "node --check main.js && node --check preload.js && node --check src/git.js && node --check src/claude.js && node --check src/ado.js && node --check src/github.js && node --check renderer/lib.js && node --check renderer/app.js"
   },
   "engines": {
     "node": ">=22.12.0"

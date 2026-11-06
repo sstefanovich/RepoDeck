@@ -22,10 +22,16 @@ contextBridge.exposeInMainWorld('api', {
   onUpdate: on('app:update'),
   restartToUpdate: () => ipcRenderer.invoke('app:restartToUpdate'),
   version: () => ipcRenderer.invoke('app:version'),
-  ado: {
-    hasToken: () => ipcRenderer.invoke('ado:hasToken'),
-    setToken: (token) => ipcRenderer.invoke('ado:setToken', token),
-    prStatus: (repo, branch) => ipcRenderer.invoke('ado:prStatus', repo, branch),
+  // GitHub and Azure DevOps. The tokens stay in the main process; the page only learns whether one is saved.
+  host: {
+    tokens: () => ipcRenderer.invoke('tokens:has'),
+    setToken: (kind, token) => ipcRenderer.invoke('tokens:set', kind, token),
+    prStatus: (repo, branch) => ipcRenderer.invoke('host:prStatus', repo, branch),
+    info: (repo) => ipcRenderer.invoke('host:info', repo),
+    createPr: (repo, opts) => ipcRenderer.invoke('host:createPr', repo, opts),
+    githubOwners: () => ipcRenderer.invoke('host:githubOwners'),
+    adoProjects: (org) => ipcRenderer.invoke('host:adoProjects', org),
+    createRepo: (kind, opts) => ipcRenderer.invoke('host:createRepo', kind, opts),
   },
   claude: {
     find: () => ipcRenderer.invoke('claude:find'),
