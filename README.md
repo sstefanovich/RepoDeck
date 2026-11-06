@@ -21,6 +21,7 @@ Most git tools assume you already know git and that you work in one repo at a ti
 ### Workspaces and tabs
 
 - **Open repo folder** (or drag folders onto the window), or clone one. Group related repos into **workspaces**.
+- **New repo from a folder:** pick (or make) any folder, or open one that isn't a repo yet. One dialog sets it up: the main branch name, a starter `.gitignore` (guessed from the files, e.g. Node, .NET, Python), the first commit, and the URL of an empty repo on GitHub or Azure DevOps (with links to create one). It's then sent to the server. If the server repo was created with a README or licence, RepoDeck offers to combine the two before sending.
 - The sidebar shows each repo's branch, uncommitted changes (●), commits to send (↑) and commits to get (↓).
 - **Drag a repo** in the sidebar onto another workspace to move it there, or hold <kbd>Ctrl</kbd> while dropping to have it in both. The message that follows has an **Undo** button.
 - **Workspace actions** run on every repo at once: check for updates, get latest, send, *New branch in all*, *Switch all to branch*, *Update all from…* (bring `dev` or any branch into every repo, with a per-repo preview of what's coming and one Undo for all of them), *Tidy up branches*, *Open all in VS Code*.

@@ -169,6 +169,29 @@ function webUrl(remote) {
   return null;
 }
 
+// ---------- starter .gitignore files for new repos ----------
+const OS_JUNK = ['# Editor and OS files', '.vscode/*', '!.vscode/settings.json', '!.vscode/extensions.json', '.idea/', 'Thumbs.db', 'Desktop.ini', '.DS_Store', '*.swp', ''];
+const GITIGNORES = {
+  node: { label: 'Node.js / JavaScript', lines: ['# Dependencies and build output', 'node_modules/', 'dist/', 'build/', 'out/', 'coverage/', '.next/', '.nuxt/', '*.tsbuildinfo', '', '# Logs and local settings', '*.log', 'npm-debug.log*', '.env', '.env.*', '!.env.example', ''] },
+  dotnet: { label: '.NET / Visual Studio', lines: ['# Build output', '[Bb]in/', '[Oo]bj/', '[Dd]ebug/', '[Rr]elease/', 'x64/', 'x86/', '[Aa]rm64/', 'artifacts/', 'TestResults/', '*.nupkg', 'packages/', '', '# Visual Studio', '.vs/', '*.user', '*.suo', '*.userosscache', '*.sln.docstates', '*.rsuser', '_ReSharper*/', ''] },
+  python: { label: 'Python', lines: ['# Byte code, environments and build output', '__pycache__/', '*.py[cod]', '.venv/', 'venv/', 'env/', '.env', 'build/', 'dist/', '*.egg-info/', '.pytest_cache/', '.mypy_cache/', '.ruff_cache/', '.coverage', 'htmlcov/', '.ipynb_checkpoints/', ''] },
+  java: { label: 'Java / Kotlin', lines: ['# Build output', 'target/', 'build/', 'out/', '.gradle/', '*.class', '*.jar', '!gradle/wrapper/gradle-wrapper.jar', '*.war', '*.log', ''] },
+  go: { label: 'Go', lines: ['# Build output', '*.exe', '*.test', '*.out', 'bin/', 'vendor/', ''] },
+  general: { label: 'Editor and system files only', lines: [] },
+};
+for (const t of Object.values(GITIGNORES)) t.text = [...t.lines, ...OS_JUNK].join('\n');
+
+// Guesses the kind of project from the names of the files at the top of the folder.
+function suggestGitignore(names) {
+  const has = (re) => names.some((n) => re.test(n));
+  if (has(/^package\.json$/i)) return 'node';
+  if (has(/\.(sln|slnx|csproj|fsproj|vbproj)$/i)) return 'dotnet';
+  if (has(/^(pyproject\.toml|requirements.*\.txt|setup\.py|Pipfile)$/i) || has(/\.py$/i)) return 'python';
+  if (has(/^(pom\.xml|build\.gradle(\.kts)?|settings\.gradle(\.kts)?)$/i)) return 'java';
+  if (has(/^go\.mod$/i)) return 'go';
+  return 'general';
+}
+
 // ---------- operations (callable from the UI) ----------
 const ops = {
   async resolveRepo(folder) {
@@ -180,6 +203,49 @@ const ops = {
   async init(folder) {
     await must(folder, ['init']);
     return true;
+  },
+
+  // What the "Set up a new repo" dialog needs to know about a plain folder.
+  async newRepoInfo(folder) {
+    let names = [];
+    try { names = fs.readdirSync(folder).filter((n) => n !== '.git'); } catch { throw new GitError(`Can't read the folder ${folder}.`); }
+    const resolved = path.resolve(folder);
+    const risky = resolved === path.parse(resolved).root || resolved.toLowerCase() === os.homedir().toLowerCase();
+    return {
+      name: path.basename(resolved),
+      items: names.length,
+      hasGitignore: names.includes('.gitignore'),
+      suggested: suggestGitignore(names),
+      templates: Object.entries(GITIGNORES).map(([id, t]) => ({ id, label: t.label })),
+      risky,
+    };
+  },
+
+  // Turns a plain folder into a repo: git init on `branch`, an optional starter .gitignore
+  // (never replacing one that's there), a first commit of everything, and optionally the server.
+  async setupRepo(folder, { branch = 'main', gitignore = null, message = '', remote = '' } = {}) {
+    const b = (branch || 'main').trim();
+    if (!(await ops.checkBranchName(b))) throw new GitError(`"${b}" can't be used as a branch name.`, 'BAD_NAME');
+    const url = (remote || '').trim();
+    await must(folder, ['init', '-b', b]);
+    const ignoreFile = path.join(folder, '.gitignore');
+    if (gitignore && GITIGNORES[gitignore] && !fs.existsSync(ignoreFile)) fs.writeFileSync(ignoreFile, GITIGNORES[gitignore].text);
+    await must(folder, ['add', '-A']);
+    // --allow-empty so an empty folder still gets a first commit (and so a branch that can be sent).
+    await must(folder, ['commit', '--allow-empty', '-m', (message || '').trim() || 'Initial commit']);
+    if (url) await must(folder, ['remote', 'add', 'origin', url]);
+    return { path: folder, branch: b };
+  },
+
+  // For a new repo whose server copy was created with a README/licence: bring those commits in
+  // (the two histories share no commits, hence --allow-unrelated-histories) so it can be sent.
+  async joinServerHistory(repo) {
+    const st = await ops.status(repo);
+    if (!st.branch) throw new GitError('You are not on a branch.', 'DETACHED');
+    const remote = await firstRemote(repo);
+    await must(repo, ['fetch', remote], { progressKey: repo });
+    const r = await run(repo, ['merge', '--no-edit', '--allow-unrelated-histories', `${remote}/${st.branch}`]);
+    return withConflicts(repo, r);
   },
 
   async status(repo) {
@@ -1147,6 +1213,25 @@ const plans = {
   },
   clone: (url, parent) => [step(['clone', url.trim()], `Download a full copy of the repo into a new folder inside ${parent}.`)],
   init: () => [step(['init'], 'Start tracking this folder with git (creates the hidden .git folder). Your files are not changed.')],
+  setupRepo: (folder, { branch = 'main', gitignore = null, message = '', remote = '' } = {}) => {
+    const b = (branch || 'main').trim();
+    const url = (remote || '').trim();
+    const addIgnore = gitignore && GITIGNORES[gitignore] && !fs.existsSync(path.join(folder, '.gitignore'));
+    return [
+      step(['init', '-b', b], `Start tracking this folder with git, on a branch called ${b}. Your files are not changed.`),
+      ...(addIgnore ? [info(`Write a .gitignore file (${GITIGNORES[gitignore].label}) so build output, downloaded packages and editor files are left out.`)] : []),
+      step(['add', '-A'], 'Include every file in the folder (except what .gitignore leaves out).'),
+      step(['commit', '--allow-empty', '-m', (message || '').trim() || 'Initial commit'], 'Save them as the first snapshot (commit).'),
+      ...(url ? [step(['remote', 'add', 'origin', url], 'Remember this URL as the server, under the nickname “origin”.')] : []),
+    ];
+  },
+  async joinServerHistory(repo) {
+    const st = await ops.status(repo);
+    return [
+      step(['fetch', 'origin'], 'Download what is already on the server (such as a README or licence).'),
+      step(['merge', '--no-edit', '--allow-unrelated-histories', `origin/${st.branch}`], "Combine the server's commits with yours. They started separately, so git has to be told that's fine."),
+    ];
+  },
   setIdentity: (name, email) => [
     step(['config', '--global', 'user.name', name], 'Set the name stamped on your commits (for every repo on this computer).'),
     step(['config', '--global', 'user.email', email], 'Set the email stamped on your commits.'),

@@ -13,6 +13,7 @@ const MUTATING = new Set([
   'renameBranch', 'deleteBranch', 'merge', 'undoLastCommit', 'stashSave', 'stashApply', 'stashPop', 'stashDrop',
   'resolveSide', 'saveResolution', 'markResolved', 'abortOp', 'continueOp', 'skipOp', 'cherryPick', 'cherryPickOnto',
   'clone', 'init', 'setIdentity', 'resetTo', 'restoreBranch', 'stashStore', 'updateFrom', 'revertCommit', 'finishBranch', 'discardLines', 'applyPatch', 'tidyCommits', 'createTag', 'pushTag', 'deleteTag', 'restoreTag',
+  'setupRepo', 'joinServerHistory',
 ]);
 let previewSuppressed = 0;
 const CANCELLED = 'CANCELLED';
@@ -713,6 +714,7 @@ function renderHome() {
     <div class="home-cards">
       <div class="hcard"><h3>Already have a repo on your computer?</h3><p>Pick its folder — the one you cloned into. You can also just <b>drag the folder onto this window</b>.</p><button class="btn primary" data-action="open-repo-folder">📂 Open repo folder…</button></div>
       <div class="hcard"><h3>Need to download one?</h3><p>Clone a repo from GitHub, Azure DevOps, GitLab… using its URL.</p><button class="btn" data-action="clone">⤓ Clone a repo</button></div>
+      <div class="hcard"><h3>Starting something new?</h3><p>Turn any folder into a repo, save your files as the first commit, and put it on GitHub or Azure DevOps in one go.</p><button class="btn" data-action="new-repo">✚ New repo from a folder</button></div>
       <div class="hcard"><h3>Work on several repos together?</h3><p>A <b>workspace</b> groups repos you use together — e.g. the three repos of one project — so you can see them side by side and pull, push or branch all of them at once.</p><button class="btn" data-action="new-ws">＋ New workspace</button></div>
     </div>
     <p class="hint">Keep coding in VS Code or Cursor as usual — RepoDeck watches your folders and updates by itself. New to git? <a href="#" data-action="help">Git explained</a>.</p>
@@ -3023,29 +3025,130 @@ function ensureWorkspace(wsId) {
 }
 
 async function addRepoPath(wsId, folder) {
-  let info = await git('resolveRepo', folder);
-  if (!info.isRepo) {
-    const c = await choose("This folder isn't a git repo", `<p><code>${esc(folder)}</code> isn't tracked by git yet.</p>`, [
-      { id: 'init', label: 'Start tracking it with git', desc: 'Runs <code>git init</code>, which creates an empty history for this folder. Your files are not changed.' },
-    ]);
-    if (c !== 'init') return null;
-    try { await git('init', folder); } catch (e) { showError("Couldn't set up git", e); return null; }
-    info = { path: folder };
-  } else if (!samePath(info.path, folder)) toast(`Using the repo's top folder: ${info.path}`, 'info');
-  const w = ensureWorkspace(wsId);
-  if (!w.repos.some((p) => samePath(p, info.path))) w.repos.push(info.path);
-  await saveConfig();
-  await refreshRepo(info.path);
-  return { w, path: info.path };
+  const info = await gitRaw('resolveRepo', folder);
+  if (!info.isRepo) return setupNewRepo(wsId, folder, { notRepo: true });
+  if (!samePath(info.path, folder)) toast(`Using the repo's top folder: ${info.path}`, 'info');
+  return attachRepo(wsId, info.path);
 }
 
-// Adds folder(s) to a workspace (creating "My repos" if there is none) and opens the last one in a tab.
+// Puts a repo in a workspace (creating "My repos" if there is none) and loads its status.
+async function attachRepo(wsId, repo) {
+  const w = ensureWorkspace(wsId);
+  if (!w.repos.some((p) => samePath(p, repo))) w.repos.push(repo);
+  await saveConfig();
+  await refreshRepo(repo);
+  return { w, path: repo };
+}
+
+// Adds folder(s) to a workspace and opens the last one in a tab.
 async function addRepos(wsId, folders) {
   let last = null;
   for (const folder of folders) last = (await addRepoPath(wsId, folder)) || last;
-  if (!last) return;
+  if (!last || last.opened) return;
   renderSidebar();
   openRepo(last.path, last.w.id);
+}
+
+// ---------- set up a new repo from a plain folder ----------
+async function newRepo(wsId) {
+  const folder = await api.pickFolder('Choose (or make) the folder for your new repo');
+  if (!folder) return;
+  const info = await gitRaw('resolveRepo', folder);
+  if (!info.isRepo) { await setupNewRepo(wsId, folder); return; }
+  if (samePath(info.path, folder)) toast('That folder is already a repo, so it was opened as it is.', 'info');
+  else toast(`That folder is inside the repo ${info.path}, so that repo was opened.`, 'info');
+  await addRepos(wsId, [info.path]);
+}
+
+// One dialog for git init, a starter .gitignore, the first commit, the server URL and the first send.
+// Returns { w, path, opened: true } once the repo exists (even if sending failed), or null.
+async function setupNewRepo(wsId, folder, { notRepo = false } = {}) {
+  let info;
+  try { info = await gitRaw('newRepoInfo', folder); } catch (e) { showError("Couldn't open the folder", e); return null; }
+  if (info.risky) {
+    await modal({ title: "Let's pick a smaller folder", body: `<p><code>${esc(folder)}</code> is a whole drive or your user folder. Making it a repo would track everything in it. Choose (or make) a folder just for this project instead.</p>` });
+    return null;
+  }
+  const ws = state.config.workspaces;
+  const urlHint = (host) => host === 'github' ? 'https://github.com/you/project.git' : 'https://dev.azure.com/org/project/_git/repo';
+  const r = await modal({
+    title: 'Set up a new repo',
+    wide: true,
+    body: `${notRepo ? `<p class="intro"><code>${esc(folder)}</code> isn't a git repo yet. RepoDeck can set it up, save your files as the first commit, and put it on GitHub or Azure DevOps.</p>`
+        : `<p class="intro">Folder: <code>${esc(folder)}</code> <span class="muted small">(${info.items ? `${info.items} item${info.items === 1 ? '' : 's'} in it` : 'empty'})</span></p>`}
+      <div class="setup-grid">
+        <label class="field"><span>Main branch name</span><input name="branch" value="main" spellcheck="false"></label>
+        ${info.hasGitignore
+          ? '<div class="field"><span>Files to leave out</span><p class="hint">This folder already has a <code>.gitignore</code>, so it is used as it is.</p></div>'
+          : `<label class="field"><span>Files to leave out (.gitignore)</span><select name="gitignore">
+              <option value="">None — include every file</option>
+              ${info.templates.map((t) => `<option value="${t.id}" ${t.id === info.suggested ? 'selected' : ''}>${esc(t.label)}</option>`).join('')}
+            </select></label>`}
+      </div>
+      <label class="field"><span>First commit message</span><input name="message" value="Initial commit"></label>
+      <h3>Put it on a server <span class="muted small">(optional — you can do this later with Send)</span></h3>
+      <p class="hint">Create an <b>empty</b> repo${info.name ? ` (e.g. named <b>${esc(info.name)}</b>)` : ''} — no README, .gitignore or licence — then paste its URL here.
+        <a href="#" data-new-on="github">Create one on GitHub ↗</a> · <a href="#" data-new-on="ado">Create one in Azure DevOps ↗</a></p>
+      <label class="field"><span>Server URL</span><input name="remote" placeholder="${urlHint('github')}  or  ${urlHint('ado')}" spellcheck="false"></label>
+      <label class="check"><input type="checkbox" name="send" checked> Send it to the server straight away</label>
+      ${ws.length > 1 ? `<label class="field"><span>Add to workspace</span><select name="ws">${ws.map((w) => `<option value="${w.id}" ${(wsId || state.view.ws) === w.id ? 'selected' : ''}>${esc(w.name)}</option>`).join('')}</select></label>` : ''}`,
+    buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'ok', label: 'Set up repo', kind: 'primary' }],
+    init: (el) => {
+      el.querySelectorAll('[data-new-on]').forEach((a) => a.addEventListener('click', (e) => {
+        e.preventDefault();
+        api.openUrl(a.dataset.newOn === 'github' ? 'https://github.com/new' : 'https://dev.azure.com/');
+      }));
+      const branch = el.querySelector('[name=branch]');
+      const ok = el.querySelector('[data-close=ok]');
+      branch.addEventListener('input', () => { ok.disabled = !branch.value.trim(); });
+    },
+  });
+  if (r.id !== 'ok') return null;
+  const v = r.values;
+  const remote = v.remote.trim();
+  const target = v.ws || wsId;
+  try {
+    await git('setupRepo', folder, { branch: v.branch, gitignore: v.gitignore || null, message: v.message, remote });
+  } catch (e) {
+    if (e.code === CANCELLED) return null;
+    // A later step (say, the commit) can fail after git init worked: still show the repo so it can be fixed there.
+    const now = await gitRaw('resolveRepo', folder).catch(() => ({}));
+    let added = null;
+    if (now.isRepo && samePath(now.path, folder)) { added = await attachRepo(target, folder); renderSidebar(); openRepo(folder, added.w.id); }
+    showError("Couldn't finish setting up the repo", e);
+    return added && { ...added, opened: true };
+  }
+  const added = await attachRepo(target, folder);
+  renderSidebar();
+  openRepo(folder, added.w.id);
+  if (!remote) toast('Repo set up, with your files as the first commit. Click Send when you want to put it on a server.', 'ok');
+  else if (!v.send) toast('Repo set up and linked to the server. Click Send when you\'re ready to publish it.', 'ok');
+  else await publishNewRepo(folder);
+  return { ...added, opened: true };
+}
+
+// The first send of a new repo. If the server repo was created with a README or licence, offers to combine.
+async function publishNewRepo(repo) {
+  try {
+    let r = await busy(repo, 'Sending…', () => git('push', repo));
+    if (r.rejected) {
+      const c = await choose('The repo on the server isn\'t empty', '<p>It already has commits, usually a README, .gitignore or licence added when it was created. Those need to be combined with your files before yours can be sent.</p>', [
+        { id: 'join', label: 'Combine them, then send', desc: "Brings the server's files in next to yours, then sends. If the same file is on both sides, you'll choose what to keep.", kind: 'primary' },
+      ]);
+      if (c !== 'join') { toast('Your repo is set up here. Send it once the server side is sorted out.', 'info'); return false; }
+      const m = await busy(repo, 'Combining…', () => git('joinServerHistory', repo));
+      if (m.conflicts) return afterMaybeConflict(repo, m);
+      r = await busy(repo, 'Sending…', () => git('push', repo));
+      if (r.rejected) throw new Error(r.output);
+    }
+    const web = await gitRaw('remoteWebUrl', repo).catch(() => null);
+    toast('Your new repo is on the server.', 'ok', web ? { label: 'Open it', fn: () => api.openUrl(web) } : null);
+    return true;
+  } catch (e) {
+    if (e.code === CANCELLED) return false;
+    showError("Your repo is set up here, but couldn't be sent", e);
+    return false;
+  }
 }
 
 async function addRepo(wsId) {
@@ -3336,6 +3439,7 @@ function paletteCommands() {
   cmds.push(
     { label: 'Open repo folder…', hint: 'add', run: () => addRepo(state.view.ws) },
     { label: 'Clone a repo…', hint: 'add', run: () => cloneRepo() },
+    { label: 'New repo from a folder…', hint: 'add', run: () => newRepo(state.view.ws) },
     { label: 'New workspace…', hint: 'add', run: () => newWorkspace() },
     ...(aiOn() ? [{ label: 'Ask Claude', hint: 'Ctrl+J', run: () => toggleClaude(true) }] : []),
     { label: 'Settings', hint: '', run: () => openSettings() },
@@ -3754,6 +3858,7 @@ function rerender() {
 const actions = {
   'new-ws': () => newWorkspace(),
   clone: () => cloneRepo(),
+  'new-repo': () => newRepo(state.view.ws),
   settings: () => openSettings(),
   help: () => openHelp(),
   'toggle-log': () => { state.logOpen = !state.logOpen; state.unseenLogs = 0; renderLog(); },
