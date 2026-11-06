@@ -1,5 +1,5 @@
 // Pure helpers shared by the UI (no DOM, no app state), so they can be unit tested.
-// Loaded as a plain script before app.js; also exported for Node when 'module' exists.
+// Loaded as a plain script before the UI scripts (core.js … app.js); also exported for Node when 'module' exists.
 'use strict';
 
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);

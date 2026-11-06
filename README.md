@@ -232,10 +232,11 @@ RepoDeck is an [Electron](https://www.electronjs.org/) app with no build step an
 |---|---|
 | `main.js` | Electron main process: window, settings, folder watching, editor and terminal launching, updates |
 | `src/git.js` | Every git operation, with progress, cancel and plain-English previews |
-| `src/ado.js` | Azure DevOps pull request status (runs in the main process, which holds the token) |
+| `src/ado.js` | Azure DevOps: pull request status, creating pull requests and repos (runs in the main process, which holds the token) |
+| `src/github.js` | GitHub: the same, through GitHub's API |
 | `src/claude.js` | Runs Claude Code headless and routes its permission prompts to RepoDeck's approval cards |
 | `preload.js` | The bridge between the UI and the main process |
-| `renderer/app.js` | The UI |
+| `renderer/*.js` | The UI, as plain scripts sharing one global scope and loaded in order by `index.html`: `core.js` (state, dialogs, undo) first, then one file per area (`sidebar`, `repo`, `branches`, `history`, `pull-requests`, `repo-tabs`, `workspace`, `setup`, `menus`, `claude-panel`), and `app.js` (event handling, start-up) last |
 | `renderer/lib.js` | Pure helpers (diff, conflict parsing, syntax colours, graph, search), unit tested |
 | `test/` | Tests (`node --test`) |
 

@@ -62,6 +62,18 @@
   <div id="modal-root"></div>
   <div id="toast-root"></div>
   <script src="lib.js"></script>
+  <!-- The UI, as plain scripts sharing one global scope. Order matters: app.js (event handling, start-up) goes last. -->
+  <script src="core.js"></script>
+  <script src="sidebar.js"></script>
+  <script src="repo.js"></script>
+  <script src="branches.js"></script>
+  <script src="history.js"></script>
+  <script src="pull-requests.js"></script>
+  <script src="repo-tabs.js"></script>
+  <script src="workspace.js"></script>
+  <script src="setup.js"></script>
+  <script src="menus.js"></script>
+  <script src="claude-panel.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
