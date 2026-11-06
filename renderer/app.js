@@ -13,7 +13,7 @@ const MUTATING = new Set([
   'renameBranch', 'deleteBranch', 'merge', 'undoLastCommit', 'stashSave', 'stashApply', 'stashPop', 'stashDrop',
   'resolveSide', 'saveResolution', 'markResolved', 'abortOp', 'continueOp', 'skipOp', 'cherryPick', 'cherryPickOnto',
   'clone', 'init', 'setIdentity', 'resetTo', 'restoreBranch', 'stashStore', 'updateFrom', 'revertCommit', 'finishBranch', 'discardLines', 'applyPatch', 'tidyCommits', 'createTag', 'pushTag', 'deleteTag', 'restoreTag',
-  'setupRepo', 'joinServerHistory',
+  'setupRepo', 'joinServerHistory', 'useHttps',
 ]);
 let previewSuppressed = 0;
 const CANCELLED = 'CANCELLED';
@@ -150,7 +150,7 @@ const FRIENDLY = [
   [/Please tell me who you are|empty ident|unable to auto-detect email/i, 'Git needs your name and email before it can save commits. They are stamped on every commit so others know who made it.'],
   [/would be overwritten by (checkout|merge|switch)|Your local changes to the following files would be overwritten/i, 'You have uncommitted changes in files that this would also change, so git stopped to protect your work. Commit them or put them on the Shelf, then try again.'],
   [/\[rejected\]|fetch first|non-fast-forward/i, "The server has commits you don't have yet. Get latest first, then send again."],
-  [/Authentication failed|could not read Username|Permission denied \(publickey\)|terminal prompts disabled|403/i, "Git couldn't log in to the server. Try a push once from VS Code or a terminal so your login gets saved (Git Credential Manager), then try again here."],
+  [/Authentication failed|could not read Username|Permission denied \(publickey\)|terminal prompts disabled|403/i, "Git couldn't log in to the server. Your saved login may have expired. Send, Get latest or Check for updates on this repo offers to sign in again."],
   [/not fully merged/i, "This branch has commits that aren't in any other branch yet. Deleting it would lose them."],
   [/already exists/i, 'Something with that name already exists.'],
   [/not a valid branch name|is not a valid branch name/i, 'That is not a valid branch name. Use letters, numbers, dashes and slashes (e.g. feature/login-page).'],
@@ -164,9 +164,49 @@ const FRIENDLY = [
 ];
 const explain = (msg) => (FRIENDLY.find(([re]) => re.test(msg)) || [])[1] || null;
 
-async function showError(title, err) {
+const AUTH_FAILED = /Authentication failed|could not read Username|could not read Password|Permission denied \(publickey\)|terminal prompts disabled|returned error: 40[13]|Invalid username or (password|token)|Host key verification failed/i;
+
+// A login problem: explain it and offer to sign in again (HTTPS) or switch to HTTPS (SSH), then retry.
+// where: { repo } for an existing repo's origin, or { url } (e.g. a clone).
+async function showSignInError(title, raw, { repo = null, url = null, retry = null } = {}) {
+  const remote = url || (repo ? await gitRaw('remoteUrl', repo).catch(() => null) : null);
+  const ssh = /publickey|Host key verification/i.test(raw) || (remote && !/^https?:\/\//i.test(remote));
+  const host = (() => { try { return new URL(remote).host; } catch { return remote?.match(/@([^:/]+)/)?.[1] || 'the server'; } })();
+  const body = ssh
+    ? `<p><b>${esc(host)}</b> didn't accept your SSH key. Either no key is set up on this computer, or the server doesn't know it.</p>
+       <p>${repo ? 'The easiest fix is to use HTTPS for this repo instead. You sign in once in a browser window and the login is saved for next time.' : 'Try the HTTPS address of the repo instead. You sign in once in a browser window and the login is saved.'}</p>`
+    : `<p>Git couldn't log in to <b>${esc(host)}</b>. Your saved login may have expired, been changed, or never been saved.</p>
+       <p><b>Sign in again</b> forgets the old login and opens the sign-in window (Git Credential Manager). ${retry ? 'RepoDeck then tries again.' : ''}</p>`;
+  const r = await modal({
+    title,
+    body: `${body}<details><summary>What git actually said</summary><pre class="raw">${esc(raw)}</pre></details>`,
+    buttons: [
+      { id: 'cancel', label: 'Close' },
+      ...(ssh ? (repo ? [{ id: 'https', label: 'Use HTTPS and sign in', kind: 'primary' }] : []) : [{ id: 'signin', label: 'Sign in again', kind: 'primary' }]),
+    ],
+  });
+  if (r.id !== 'signin' && r.id !== 'https') return;
+  try {
+    if (r.id === 'https') {
+      const https = await git('useHttps', repo);
+      toast(`This repo now uses ${https}.`, 'info');
+      await refreshRepo(repo);
+    }
+    const box = toast('Finish signing in in the window that opened…', 'info');
+    try { await gitRaw('signIn', repo || remote); } finally { box?.remove?.(); }
+    toast(`Signed in to ${host}.`, 'ok');
+    if (retry) await retry();
+  } catch (e) {
+    if (e.code === CANCELLED) return;
+    const why = e.code === 'NO_HELPER' || e.code === 'SIGNIN_FAILED' ? e.message : null;
+    await modal({ title: "Couldn't sign in", body: `<p>${esc(why || "The sign-in didn't work.")}</p>${why ? '' : `<details><summary>Details</summary><pre class="raw">${esc(e.message)}</pre></details>`}` });
+  }
+}
+
+async function showError(title, err, where = null) {
   if (err?.code === CANCELLED) return;
   const raw = err?.message || String(err);
+  if (where && AUTH_FAILED.test(raw)) return showSignInError(title, raw, where);
   const nice = explain(raw);
   const identity = /tell me who you are|empty ident|auto-detect email/i.test(raw);
   const r = await modal({
@@ -277,6 +317,7 @@ function toast(msg, kind = 'info', action = null) {
   }
   $('#toast-root').appendChild(el);
   setTimeout(dismiss, life);
+  return el;
 }
 
 // ---------- undo ----------
@@ -1414,7 +1455,7 @@ async function doFetch(repo, { silent = false } = {}) {
     if (!silent) toast(st.behind ? `${plural(st.behind, 'new commit')} on the server for ${st.branch}.` : `${basename(repo)}: nothing new on the server.`, st.behind ? 'info' : 'ok');
     if (state.tab === 'branches' && samePath(repo, currentRepo())) loadBranches();
     loadPrStatus(repo, true);
-  } catch (e) { if (!silent) showError("Couldn't check for updates", e); else throw e; }
+  } catch (e) { if (!silent) showError("Couldn't check for updates", e, { repo, retry: () => doFetch(repo) }); else throw e; }
 }
 
 async function doPull(repo) {
@@ -1438,7 +1479,7 @@ async function doPull(repo) {
     if (/Already up to date/i.test(r.output || '')) toast('Already up to date.', 'ok');
     else offerUndoMove(repo, before, 'Got the latest changes.', `get latest on ${st.branch}`);
     return true;
-  } catch (e) { showError("Couldn't get the latest", e); return false; }
+  } catch (e) { showError("Couldn't get the latest", e, { repo, retry: () => doPull(repo) }); return false; }
 }
 
 async function doPush(repo) {
@@ -1465,7 +1506,7 @@ async function doPush(repo) {
     return true;
   } catch (e) {
     if (e.code === 'NO_REMOTE') return addRemoteFlow(repo);
-    showError("Couldn't send", e);
+    showError("Couldn't send", e, { repo, retry: () => doPush(repo) });
     return false;
   }
 }
@@ -3146,7 +3187,7 @@ async function publishNewRepo(repo) {
     return true;
   } catch (e) {
     if (e.code === CANCELLED) return false;
-    showError("Your repo is set up here, but couldn't be sent", e);
+    showError("Your repo is set up here, but couldn't be sent", e, { repo, retry: () => publishNewRepo(repo) });
     return false;
   }
 }
@@ -3214,7 +3255,7 @@ async function cloneRepo() {
   } catch (e) {
     box.remove();
     if (e.code === 'CANCELLED') toast('Clone cancelled.', 'info');
-    else showError("Couldn't clone", e);
+    else showError("Couldn't clone", e, { url: r.values.url.trim() });
   }
 }
 

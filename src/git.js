@@ -169,6 +169,17 @@ function webUrl(remote) {
   return null;
 }
 
+// The HTTPS clone address for an SSH remote (Azure DevOps' SSH form has its own layout).
+function httpsUrl(remote) {
+  const u = remote.trim();
+  if (/^https?:\/\//i.test(u)) return u;
+  let m = u.match(/^(?:ssh:\/\/)?git@ssh\.dev\.azure\.com(?::v3|:22\/v3)?[:/]([^/]+)\/([^/]+)\/([^/]+?)\/?$/i)
+    || u.match(/^[^@]+@vs-ssh\.visualstudio\.com:v3\/([^/]+)\/([^/]+)\/([^/]+?)\/?$/i);
+  if (m) return `https://dev.azure.com/${m[1]}/${m[2]}/_git/${m[3]}`;
+  m = u.match(/^(?:ssh:\/\/)?git@([^:/]+)(?::\d+)?[:/](.+?)(?:\.git)?\/?$/);
+  return m ? `https://${m[1]}/${m[2]}.git` : null;
+}
+
 // ---------- starter .gitignore files for new repos ----------
 const OS_JUNK = ['# Editor and OS files', '.vscode/*', '!.vscode/settings.json', '!.vscode/extensions.json', '.idea/', 'Thumbs.db', 'Desktop.ini', '.DS_Store', '*.swp', ''];
 const GITIGNORES = {
@@ -682,6 +693,38 @@ const ops = {
     return true;
   },
 
+  // Signs in to the server again after a login failure: forgets the saved login for the remote's
+  // host, then asks the credential helper (Git Credential Manager) for a fresh one, which shows its
+  // sign-in window, and saves it. `target` is a repo folder (its origin is used) or a URL.
+  async signIn(target) {
+    const url = /^[a-z]+:\/\//i.test(target) ? target : await ops.remoteUrl(target);
+    if (!url) throw new GitError('This repo has no server (remote) configured.', 'NO_REMOTE');
+    if (!/^https?:\/\//i.test(url)) throw new GitError('This server is reached over SSH, which logs in with an SSH key rather than a password.', 'SSH');
+    const cwd = /^[a-z]+:\/\//i.test(target) ? os.homedir() : target;
+    // An empty entry resets the list (git's own rule), so only the entries after the last empty one count.
+    const helpers = (await run(cwd, ['config', '--get-all', 'credential.helper'], { quiet: true })).stdout.replace(/\r?\n$/, '').split(/\r?\n/);
+    if (!helpers.slice(helpers.lastIndexOf('') + 1).some((h) => h.trim())) throw new GitError('Git has no credential helper set up, so it has nowhere to keep your login. Installing Git for Windows (with Git Credential Manager) sets one up.', 'NO_HELPER');
+    const u = new URL(url);
+    const input = [`protocol=${u.protocol.replace(/:$/, '')}`, `host=${u.host}`, `path=${decodeURIComponent(u.pathname.replace(/^\//, ''))}`,
+      ...(u.username ? [`username=${decodeURIComponent(u.username)}`] : []), '', ''].join('\n');
+    // quiet: the answer holds the password/token, so it must never reach the command log.
+    await run(cwd, ['credential', 'reject'], { input, quiet: true });
+    const r = await run(cwd, ['credential', 'fill'], { input, quiet: true, extraEnv: { GCM_INTERACTIVE: 'auto' } });
+    if (!r.ok || !/^password=/m.test(r.stdout)) throw new GitError("The sign-in didn't finish, so nothing was saved.", 'SIGNIN_FAILED');
+    await run(cwd, ['credential', 'approve'], { input: r.stdout.endsWith('\n\n') ? r.stdout : `${r.stdout.replace(/\n*$/, '')}\n\n`, quiet: true });
+    logger({ time: Date.now(), repo: cwd, command: `git credential fill  (sign in to ${u.host})`, ok: true, output: 'Signed in; the login was saved by your credential helper.' });
+    return { host: u.host };
+  },
+
+  // Points origin at the HTTPS address of the same repo (for when the SSH key isn't accepted).
+  async useHttps(repo) {
+    const url = await ops.remoteUrl(repo);
+    const https = url && httpsUrl(url);
+    if (!https) throw new GitError("Couldn't work out the HTTPS address for this server.");
+    await must(repo, ['remote', 'set-url', 'origin', https]);
+    return https;
+  },
+
   async remoteUrl(repo) {
     const r = await run(repo, ['remote', 'get-url', 'origin'], { quiet: true });
     return r.ok ? r.stdout.trim() : null;
@@ -1121,6 +1164,11 @@ const plans = {
     if (!remotes.length) return [info("No server is set up yet — you'll be asked for its URL (git remote add origin <url>), then the branch is published.")];
     const remote = remotes.includes('origin') ? 'origin' : remotes[0];
     return [step(['push', '-u', remote, 'HEAD'], `Publish ${st.branch} to ${remote} for the first time, and remember the link (-u) so later Sends just work.`)];
+  },
+  async useHttps(repo) {
+    const url = await ops.remoteUrl(repo);
+    const https = url && httpsUrl(url);
+    return https ? [step(['remote', 'set-url', 'origin', https], 'Reach the same repo over HTTPS, where you sign in with a browser window instead of an SSH key.')] : [info("Couldn't work out the HTTPS address for this server.")];
   },
   addRemote: (repo, url) => [step(['remote', 'add', 'origin', url], 'Remember this URL as the server, under the nickname “origin”.')],
   createBranch: (repo, name, start) => [step(['switch', '-c', name, '--no-track', ...(start ? [start] : [])], `Create the branch ${name} starting from ${start || 'where you are now'}, and switch to it. Uncommitted edits come along.`)],
