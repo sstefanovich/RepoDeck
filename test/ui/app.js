@@ -87,9 +87,13 @@ async function launchApp(repos, settings = {}, { workspaces = [] } = {}) {
     },
     async close() {
       try { sock.close(); } catch {}
-      kill(child);
-      await sleep(500);
-      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+      const exited = child.exitCode !== null || child.signalCode !== null ? Promise.resolve() : new Promise((r) => child.once('exit', r));
+      await kill(child);
+      // Wait for the app (and the Chromium helpers that hold files in user-data) to really be gone.
+      await Promise.race([exited, sleep(10000)]);
+      await sleep(300);
+      try { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }); }
+      catch (e) { console.warn(`Couldn't remove ${dir}: ${e.message}`); }
     },
   };
   await send('Emulation.setFocusEmulationEnabled', { enabled: true });
@@ -97,9 +101,10 @@ async function launchApp(repos, settings = {}, { workspaces = [] } = {}) {
   return app;
 }
 
+// Ends the app and every process it started (on Windows, the whole tree), resolving when taskkill is done.
 function kill(child) {
-  if (process.platform === 'win32') execFile('taskkill', ['/pid', String(child.pid), '/t', '/f'], { windowsHide: true }, () => {});
-  else child.kill();
+  if (process.platform !== 'win32') { child.kill(); return Promise.resolve(); }
+  return new Promise((r) => execFile('taskkill', ['/pid', String(child.pid), '/t', '/f'], { windowsHide: true }, () => r()));
 }
 
 // Runs in the page: buttons, tags and titles whose text spills out of their own box, or
