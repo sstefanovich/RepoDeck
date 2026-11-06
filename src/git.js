@@ -490,6 +490,39 @@ const ops = {
     return { trashed: false };
   },
 
+  // Where HEAD has been (git's reflog), newest first, for "Recover lost work". Each entry says
+  // whether its commit is still on a branch, tag or the server; ones that aren't can only be
+  // found here. -> [{ hash, short, time, action, subject, lost }]
+  async reflog(repo, { limit = 300 } = {}) {
+    const r = await run(repo, ['log', '-g', `-n${limit}`, '--date=unix', '--format=%H%x1f%gd%x1f%gs%x1f%s%x1e', 'HEAD'], { quiet: true });
+    if (!r.ok) return [];
+    const entries = r.stdout.split('\x1e').map((s) => s.trim()).filter(Boolean).map((rec) => {
+      const [hash, sel, action, subject] = rec.split('\x1f');
+      return { hash, short: hash.slice(0, 7), time: Number((sel.match(/\{(\d+)\}/) || [])[1]) || 0, action, subject };
+    }).filter((e) => e.action !== 'reset: moving to HEAD'); // what "Put on Shelf" does; not a move
+    const shas = [...new Set(entries.map((e) => e.hash))];
+    const lost = new Set();
+    if (shas.length) {
+      const l = await run(repo, ['rev-list', '--stdin'], { quiet: true, input: `${shas.join('\n')}\n--not\n--branches\n--tags\n--remotes\n` });
+      for (const h of l.stdout.split('\n')) if (h) lost.add(h.trim());
+    }
+    return entries.map((e) => ({ ...e, lost: lost.has(e.hash) }));
+  },
+
+  // Shelf items that were deleted (or popped) but whose commits git still has. -> [{ hash, short, time, message }]
+  async droppedShelf(repo, { limit = 50 } = {}) {
+    const f = await run(repo, ['fsck', '--unreachable', '--no-reflogs', '--no-progress'], { quiet: true });
+    const shas = f.stdout.split('\n').map((l) => l.match(/^unreachable commit ([0-9a-f]{40})/)?.[1]).filter(Boolean);
+    if (!shas.length) return [];
+    const onShelf = new Set((await run(repo, ['stash', 'list', '--format=%H'], { quiet: true })).stdout.split('\n').map((s) => s.trim()).filter(Boolean));
+    const log = await run(repo, ['log', '--no-walk', '--stdin', '--format=%H%x1f%ct%x1f%P%x1f%s%x1e'], { quiet: true, input: shas.join('\n') + '\n' });
+    return log.stdout.split('\x1e').map((s) => s.trim()).filter(Boolean).map((rec) => {
+      const [hash, time, parents, message] = rec.split('\x1f');
+      return { hash, short: hash.slice(0, 7), time: +time, parents: parents.split(' ').filter(Boolean).length, message };
+    }).filter((c) => c.parents >= 2 && /^(WIP on|On) [^:]+: /.test(c.message) && !onShelf.has(c.hash))
+      .sort((a, b) => b.time - a.time).slice(0, limit).map(({ parents, ...c }) => c);
+  },
+
   // Looks at what a commit is about to include and returns what deserves a second look:
   // big files, likely secrets (by name, or in the added lines) and new build/package folders.
   // paths: the ticked files (null with all = everything). Each issue:

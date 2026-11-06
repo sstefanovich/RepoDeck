@@ -2231,6 +2231,82 @@ async function cherryPickTo(repo, hashes) {
   } catch (e) { showError("Couldn't copy the commits", e); }
 }
 
+// ---------- recover lost work (reflog) ----------
+// Everywhere this repo's HEAD has been, in plain English, with a way to bring back commits that
+// are no longer on any branch (after a reset, a deleted branch, a rebase) and deleted Shelf items.
+async function recoverLostWork(repo) {
+  closePopover();
+  const entries = await gitRaw('reflog', repo).catch(() => []);
+  const lostCount = entries.filter((e) => e.lost).length;
+  const row = (e) => `<div class="rec-row ${e.lost ? 'lost' : ''}" data-hash="${e.hash}" ${e.lost ? '' : 'data-kept="1"'}>
+      <div class="rec-main">
+        <span class="rec-what">${esc(reflogText(e.action))}</span>
+        <span class="muted small">${timeAgo(e.time)} · <span class="mono">${e.short}</span>${e.subject && !e.action.includes(e.subject) ? ` · ${esc(e.subject)}` : ''}</span>
+        ${e.lost ? '<span class="tag bad" title="No branch, tag or server copy has this commit">not on any branch</span>' : ''}
+      </div>
+      <div class="rec-actions">
+        <button class="btn small ghost" type="button" data-rec="show">Show</button>
+        <button class="btn small" type="button" data-rec="branch">Make a branch here…</button>
+      </div>
+      <div class="rec-detail" hidden></div>
+    </div>`;
+  const r = await modal({
+    title: `Recover lost work in ${basename(repo)}`,
+    wide: true,
+    body: `<p class="intro">Git keeps a diary of everywhere this repo has been for about 90 days, even after a reset, a deleted branch or a rebase. Find the moment before things went wrong and make a branch there to get that work back.</p>
+      <label class="check"><input type="checkbox" id="rec-only-lost" ${lostCount ? 'checked' : ''}> Only show work that isn't on any branch <span class="muted small">(${lostCount})</span></label>
+      <div class="rec-list" id="rec-list">${entries.length ? entries.map(row).join('') : '<p class="muted">Nothing recorded yet.</p>'}</div>
+      <h3>Deleted Shelf items</h3>
+      <div class="rec-list" id="rec-shelf"><p class="muted"><span class="spinner sm"></span> Looking…</p></div>`,
+    buttons: [{ id: 'ok', label: 'Close', kind: 'primary' }],
+    init: (el) => {
+      const filter = () => { const only = el.querySelector('#rec-only-lost').checked; el.querySelectorAll('#rec-list [data-kept]').forEach((x) => { x.hidden = only; }); };
+      el.querySelector('#rec-only-lost').addEventListener('change', filter);
+      filter();
+      gitRaw('droppedShelf', repo).then((items) => {
+        el.querySelector('#rec-shelf').innerHTML = items.length ? items.map((s) => `<div class="rec-row" data-hash="${s.hash}">
+            <div class="rec-main"><span class="rec-what">${esc(s.message.replace(/^(WIP on|On) [^:]+: /, '').replace(/^\[\w+\] /, ''))}</span>
+              <span class="muted small">deleted from the Shelf · made ${timeAgo(s.time)} · <span class="mono">${s.short}</span></span></div>
+            <div class="rec-actions"><button class="btn small" type="button" data-rec="shelf" data-msg="${esc(s.message)}">Put back on the Shelf</button></div>
+          </div>`).join('') : '<p class="muted">None found.</p>';
+      }).catch(() => { el.querySelector('#rec-shelf').innerHTML = '<p class="muted">Couldn\'t look for them.</p>'; });
+      el.addEventListener('click', async (e) => {
+        const b = e.target.closest('[data-rec]');
+        if (!b) return;
+        const rowEl = b.closest('.rec-row');
+        const hash = rowEl.dataset.hash;
+        if (b.dataset.rec === 'show') {
+          const d = rowEl.querySelector('.rec-detail');
+          if (!d.hidden) { d.hidden = true; return; }
+          d.hidden = false;
+          d.innerHTML = '<span class="spinner sm"></span>';
+          const c = await gitRaw('commitDetails', repo, hash).catch((err) => ({ error: err.message }));
+          d.innerHTML = c.error ? `<pre class="raw">${esc(c.error)}</pre>` : `<div class="cd-meta">${esc(c.author)} · ${new Date(c.date * 1000).toLocaleString()}</div><pre class="cd-body">${esc(c.message)}</pre><div class="diff-scroll rec-diff">${renderDiff(c.diff)}</div>`;
+        } else if (b.dataset.rec === 'branch') {
+          const name = await ask('Make a branch here', { label: 'Branch name', value: `recovered/${hash.slice(0, 7)}`, transform: branchTransform, okLabel: 'Create branch',
+            help: "The branch starts at this point, so everything up to here is safe again. You stay on your current branch." });
+          if (!name) return;
+          try {
+            await git('restoreBranch', repo, name, hash);
+            toast(`Made the branch ${name}. Switch to it from the branch menu to see the work.`, 'ok');
+            rowEl.classList.remove('lost');
+            rowEl.querySelector('.tag.bad')?.remove();
+            refreshRepo(repo).then(() => onStatusChanged([repo]));
+          } catch (err) { showError("Couldn't make the branch", err); }
+        } else if (b.dataset.rec === 'shelf') {
+          try {
+            await git('stashStore', repo, hash, b.dataset.msg);
+            toast('Put back on the Shelf.', 'ok');
+            rowEl.remove();
+            refreshRepo(repo).then(() => onStatusChanged([repo]));
+          } catch (err) { showError("Couldn't put it back on the Shelf", err); }
+        }
+      });
+    },
+  });
+  if (r.id && state.tab === 'shelf' && samePath(repo, currentRepo())) loadShelf();
+}
+
 async function loadCommitDetails() {
   const repo = currentRepo();
   const pane = $('#commit-pane');
@@ -3842,6 +3918,7 @@ function openMenu(anchor, repo) {
     ${st.branch ? item('update-from', `Update ${esc(st.branch)} from another branch…`) : ''}
     ${st.branch ? item('finish-branch', `Finish ${esc(st.branch)} (after its pull request)…`) : ''}
     ${item('compare', 'Compare branches')}
+    ${item('recover', 'Recover lost work…')}
   </div>`, { width: 260, onOpen: (el) => el.querySelector('button')?.focus() });
 }
 
@@ -3906,6 +3983,7 @@ function paletteCommands() {
     a('Open in editor', 'open-editor');
     a('Open terminal', 'open-terminal');
     if (st.upstream) a('Open pull request', 'open-pr');
+    a('Recover lost work…', 'recover');
     for (const t of ['changes', 'branches', 'history', 'compare', 'shelf']) cmds.push({ label: `Go to ${t[0].toUpperCase() + t.slice(1)}`, hint: here, run: () => setTab(t) });
     for (const b of state.branches?.local || []) if (!b.current) cmds.push({ label: `Switch to ${b.name}`, hint: `${here} · branch`, run: () => switchBranch(repo, b.name) });
   }
@@ -4559,6 +4637,7 @@ const actions = {
   'switch-remote': (t) => switchBranch(currentRepo(), t.dataset.branch, t.dataset.name),
   'merge-branch': (t) => mergeBranch(currentRepo(), t.dataset.name),
   'branch-menu': (t) => branchMenu(currentRepo(), t.dataset.name),
+  recover: (t) => recoverLostWork(t.dataset.repo || currentRepo()),
   'select-commit': (t) => { state.selCommit = t.dataset.hash; document.querySelectorAll('.commit').forEach((c) => c.classList.toggle('selected', c === t)); loadCommitDetails(); },
   'undo-commit': async () => {
     const repo = currentRepo();

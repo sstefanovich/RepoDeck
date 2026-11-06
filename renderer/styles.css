@@ -701,3 +701,11 @@ body.no-ai [data-action="blame-explain"] { display: none !important; }
 .ws-pr-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 4px 0; }
 .ws-pr-row .check { flex: 1 1 260px; margin: 0; }
 .ws-pr-row select { max-width: 180px; }
+.rec-list { display: flex; flex-direction: column; gap: 4px; max-height: 45vh; overflow-y: auto; }
+.rec-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; }
+.rec-row.lost { border-color: var(--bad); }
+.rec-main { flex: 1 1 300px; min-width: 0; display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: baseline; overflow-wrap: anywhere; }
+.rec-what { font-weight: 600; }
+.rec-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.rec-detail { flex-basis: 100%; min-width: 0; }
+.rec-diff { max-height: 300px; overflow: auto; }
