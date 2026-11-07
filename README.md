@@ -113,6 +113,16 @@ Hold <kbd>Shift</kbd> and click any button, or turn previews on for everything i
 
 ![Preview dialog listing the git command for “Get latest” with an explanation](docs/screenshots/command-preview.png)
 
+### Console
+
+Prefer typing? Click **⌨ Console** at the bottom of the window (or press <kbd>Ctrl</kbd>+<kbd>`</kbd>) and type git commands the old-school way. They run in the repo you are looking at.
+
+- Lines starting with `git` run git; anything else runs in PowerShell (`dir`, `npm test`…). Output streams in with git's colours.
+- <kbd>↑</kbd>/<kbd>↓</kbd> for earlier commands, <kbd>Tab</kbd> to complete git commands and branch names, <kbd>Ctrl</kbd>+<kbd>C</kbd> to stop, <kbd>Ctrl</kbd>+<kbd>L</kbd> or `clear` to clear.
+- Risky commands (`reset --hard`, `push --force`, `clean -f`, `branch -D`…) ask first. If a command moves your branch (a commit, reset, merge or rebase), **Undo** can put it back, like any button.
+- RepoDeck updates as soon as a command finishes, and git commands are listed in *Behind the scenes* too.
+- Commands that need a real terminal (an editor, `rebase -i`, `add -p`) are explained instead of hanging, with the RepoDeck feature that does the same and an **Open in Windows Terminal** button.
+
 ### Command palette
 
 Press <kbd>Ctrl</kbd>+<kbd>K</kbd> to jump to any repo or workspace, switch branch, or run any action by typing a few letters.
@@ -189,6 +199,7 @@ Settings and workspaces are stored in `%APPDATA%\repodeck\config.json`, Claude c
 |---|---|
 | <kbd>Ctrl</kbd>+<kbd>K</kbd> | Command palette |
 | <kbd>Ctrl</kbd>+<kbd>J</kbd> | Open or close the Claude panel |
+| <kbd>Ctrl</kbd>+<kbd>`</kbd> | Open or close the console |
 | <kbd>Ctrl</kbd>+<kbd>Enter</kbd> | Commit (in the commit box) |
 | <kbd>Shift</kbd>+click | Preview a button's git commands |
 | <kbd>Ctrl</kbd>+<kbd>Tab</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Tab</kbd> | Next / previous tab |
@@ -241,9 +252,10 @@ RepoDeck is an [Electron](https://www.electronjs.org/) app with no build step an
 | `src/git.js` | Every git operation, with progress, cancel and plain-English previews |
 | `src/ado.js` | Azure DevOps: pull request status, creating pull requests and repos (runs in the main process, which holds the token) |
 | `src/github.js` | GitHub: the same, through GitHub's API |
+| `src/console.js` | The console: runs typed git and PowerShell commands, and spots interactive or risky ones |
 | `src/claude.js` | Runs Claude Code headless and routes its permission prompts to RepoDeck's approval cards |
 | `preload.js` | The bridge between the UI and the main process |
-| `renderer/*.js` | The UI, as plain scripts sharing one global scope and loaded in order by `index.html`: `core.js` (state, dialogs, undo) first, then one file per area (`sidebar`, `repo`, `branches`, `history`, `pull-requests`, `repo-tabs`, `workspace`, `setup`, `menus`, `claude-panel`), and `app.js` (event handling, start-up) last |
+| `renderer/*.js` | The UI, as plain scripts sharing one global scope and loaded in order by `index.html`: `core.js` (state, dialogs, undo) first, then one file per area (`sidebar`, `repo`, `branches`, `history`, `pull-requests`, `repo-tabs`, `workspace`, `setup`, `menus`, `claude-panel`, `console`), and `app.js` (event handling, start-up) last |
 | `renderer/lib.js` | Pure helpers (diff, conflict parsing, syntax colours, graph, search), unit tested |
 | `test/` | Tests (`node --test`) |
 

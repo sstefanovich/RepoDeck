@@ -232,6 +232,7 @@ function cycleTab(dir) {
 }
 
 function renderTabbar() {
+  updateConsole(); // the console follows the repo on screen
   const bar = $('#tabbar');
   bar.style.display = state.tabs.length ? '' : 'none';
   bar.innerHTML = state.tabs.map((t) => {

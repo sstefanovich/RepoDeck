@@ -161,6 +161,7 @@ function openMenu(anchor, repo) {
     ${st.branch ? item('finish-branch', `Finish ${esc(st.branch)} (after its pull request)…`) : ''}
     ${item('compare', 'Compare branches')}
     ${item('recover', 'Recover lost work…')}
+    ${item('console-toggle', 'Git console (Ctrl+`)')}
   </div>`, { width: 260, onOpen: (el) => el.querySelector('button')?.focus() });
 }
 
@@ -226,6 +227,7 @@ function paletteCommands() {
     a('Open terminal', 'open-terminal');
     if (st.upstream) a('Open pull request', 'open-pr');
     a('Recover lost work…', 'recover');
+    a('Git console: type git commands', 'console-toggle');
     for (const t of ['changes', 'branches', 'history', 'compare', 'shelf']) cmds.push({ label: `Go to ${t[0].toUpperCase() + t.slice(1)}`, hint: here, run: () => setTab(t) });
     for (const b of state.branches?.local || []) if (!b.current) cmds.push({ label: `Switch to ${b.name}`, hint: `${here} · branch`, run: () => switchBranch(repo, b.name) });
   }

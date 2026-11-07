@@ -33,6 +33,13 @@ contextBridge.exposeInMainWorld('api', {
     adoProjects: (org) => ipcRenderer.invoke('host:adoProjects', org),
     createRepo: (kind, opts) => ipcRenderer.invoke('host:createRepo', kind, opts),
   },
+  console: {
+    check: (line) => ipcRenderer.invoke('console:check', line),
+    run: (id, cwd, line) => ipcRenderer.invoke('console:run', id, cwd, line),
+    stop: (id) => ipcRenderer.invoke('console:stop', id),
+    onData: on('console:data'),
+    onExit: on('console:exit'),
+  },
   claude: {
     find: () => ipcRenderer.invoke('claude:find'),
     send: (text, opts) => ipcRenderer.invoke('claude:send', text, opts),

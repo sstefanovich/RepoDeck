@@ -13,7 +13,7 @@
     "setup:x64": "electron-builder --win nsis:x64 --publish never -c.nsis.artifactName=${productName}-Setup-${version}-x64.${ext}",
     "dist": "npm run setup",
     "pack": "electron-builder --win --dir --publish never",
-    "check": "node --check main.js && node --check preload.js && node --check src/git.js && node --check src/claude.js && node --check src/ado.js && node --check src/github.js && node --check renderer/lib.js && node --check renderer/core.js && node --check renderer/sidebar.js && node --check renderer/repo.js && node --check renderer/branches.js && node --check renderer/history.js && node --check renderer/pull-requests.js && node --check renderer/repo-tabs.js && node --check renderer/workspace.js && node --check renderer/setup.js && node --check renderer/menus.js && node --check renderer/claude-panel.js && node --check renderer/app.js"
+    "check": "node --check main.js && node --check preload.js && node --check src/git.js && node --check src/claude.js && node --check src/ado.js && node --check src/github.js && node --check src/console.js && node --check renderer/lib.js && node --check renderer/core.js && node --check renderer/sidebar.js && node --check renderer/repo.js && node --check renderer/branches.js && node --check renderer/history.js && node --check renderer/pull-requests.js && node --check renderer/repo-tabs.js && node --check renderer/workspace.js && node --check renderer/setup.js && node --check renderer/menus.js && node --check renderer/claude-panel.js && node --check renderer/console.js && node --check renderer/app.js"
   },
   "engines": {
     "node": ">=22.12.0"
