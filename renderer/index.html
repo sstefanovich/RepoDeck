@@ -29,12 +29,33 @@
     <main id="main">
       <div id="tabbar" class="tabbar" role="tablist"></div>
       <div id="view" class="view"></div>
+      <section id="console" class="console" hidden aria-label="Console">
+        <div id="console-resize" class="console-resize" title="Drag to resize"></div>
+        <div class="console-head">
+          <span class="console-title">⌨ Console</span>
+          <span id="console-where" class="muted small console-where"></span>
+          <div class="spacer"></div>
+          <button class="btn small ghost" data-action="console-help">Help</button>
+          <button class="btn small ghost" data-action="console-terminal" title="For commands that need a full terminal: an editor, rebase -i, add -p">Open in Windows Terminal</button>
+          <button class="btn small ghost" data-action="console-clear" title="Ctrl+L">Clear</button>
+          <button class="icon-btn" data-action="console-toggle" title="Close (Ctrl+`)" aria-label="Close the console">✕</button>
+        </div>
+        <div id="console-out" class="console-out" role="log" aria-live="polite" tabindex="0"></div>
+        <div class="console-in">
+          <label for="console-input" id="console-prompt" class="console-prompt"></label>
+          <input id="console-input" spellcheck="false" autocomplete="off">
+          <button class="btn small" id="console-stop" data-action="console-stop" hidden title="Ctrl+C">■ Stop</button>
+        </div>
+      </section>
       <div id="log" class="log">
-        <button class="log-head" data-action="toggle-log">
-          <span class="log-caret">▸</span>
-          <span>Behind the scenes — the git commands this app runs for you</span>
-          <span id="log-count" class="count"></span>
-        </button>
+        <div class="log-bar">
+          <button class="log-head" data-action="toggle-log">
+            <span class="log-caret">▸</span>
+            <span>Behind the scenes — the git commands this app runs for you</span>
+            <span id="log-count" class="count"></span>
+          </button>
+          <button id="console-toggle-btn" class="console-btn" data-action="console-toggle" title="Type git commands yourself (Ctrl+`)" aria-expanded="false">⌨ Console</button>
+        </div>
         <div id="log-body" class="log-body"></div>
       </div>
     </main>
@@ -74,6 +95,7 @@
   <script src="setup.js"></script>
   <script src="menus.js"></script>
   <script src="claude-panel.js"></script>
+  <script src="console.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

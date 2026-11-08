@@ -19,6 +19,11 @@ const actions = {
   'new-repo': () => newRepo(state.view.ws),
   settings: () => openSettings(),
   help: () => openHelp(),
+  'console-toggle': () => toggleConsole(),
+  'console-clear': () => { consoleClear(); $('#console-input')?.focus(); },
+  'console-stop': () => { consoleStop(); $('#console-input')?.focus(); },
+  'console-help': () => { if (currentRepo()) consoleLine(currentRepo(), CONSOLE_HELP); $('#console-input')?.focus(); },
+  'console-terminal': () => { const r = currentRepo(); if (r) api.openTerminal(r); },
   'toggle-log': () => { state.logOpen = !state.logOpen; state.unseenLogs = 0; renderLog(); },
   'open-ws': (t) => openWorkspace(t.dataset.ws),
   'claude-toggle': () => toggleClaude(),
@@ -388,6 +393,7 @@ document.addEventListener('keydown', (e) => {
   if ($('#modal-root').childElementCount) return;
   if (e.target.id === 'cp-input' && e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (!cl.running) claudeSend(); return; }
   if (e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === 'j') { e.preventDefault(); toggleClaude(); return; }
+  if (e.ctrlKey && !e.shiftKey && e.code === 'Backquote') { e.preventDefault(); toggleConsole(); return; }
   if (e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === 'k') { e.preventDefault(); closePopover(); openPalette(); return; }
   // Ctrl+Z outside a text box opens the Undo list (it never undoes without a click).
   if (e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === 'z' && !e.target.closest('input, textarea, select, [contenteditable]') && !$('#modal-root').lastElementChild) {
@@ -434,6 +440,7 @@ async function init() {
   state.config = await api.getConfig();
   state.tokens = await api.host.tokens().catch(() => ({ ado: false, github: false }));
   api.onLog(addLog);
+  initConsole();
   api.claude.onEvent(onClaudeEvent);
   api.onProgress((p) => {
     if (p.done) { delete state.progress[p.key]; return; }

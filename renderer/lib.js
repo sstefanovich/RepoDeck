@@ -393,6 +393,63 @@ function workItemFromBranch(branch) {
   return m ? m[1] : null;
 }
 
+// ---------- console output ----------
+// Adds a chunk of program output to buf = { lines: [''], cr: false, dropped: 0 } (the last line may be
+// unfinished). A \r on its own starts the line over, the way progress counters ("Receiving 45%")
+// expect. Keeps at most `max` lines, counting the ones dropped from the top.
+function feedOutput(buf, chunk, max = 5000) {
+  for (const part of String(chunk).split(/(\r\n|\n|\r)/)) {
+    if (part === '\n' || part === '\r\n') { buf.lines.push(''); buf.cr = false; }
+    else if (part === '\r') buf.cr = true;
+    else if (part) {
+      const i = buf.lines.length - 1;
+      buf.lines[i] = buf.cr ? part : buf.lines[i] + part;
+      buf.cr = false;
+    }
+  }
+  if (buf.lines.length > max) {
+    const n = buf.lines.length - max;
+    buf.lines.splice(0, n);
+    buf.dropped = (buf.dropped || 0) + n;
+  }
+  return buf;
+}
+
+// Terminal colours (ANSI "SGR" codes, which git uses with color.ui=always) to HTML spans with
+// classes ansi-fg0…15 and ansi-b (bold) / ansi-d (dim). Other escape codes are dropped.
+function ansiToHtml(text) {
+  let out = '';
+  let fg = null;
+  let bold = false;
+  let dim = false;
+  const re = /\x1b\[([\d;]*)([A-Za-z])|\x1b[()][A-Z0-9]|\x1b./g;
+  let last = 0;
+  const flush = (s) => {
+    if (!s) return;
+    const cls = [fg != null ? `ansi-fg${fg}` : '', bold ? 'ansi-b' : '', dim ? 'ansi-d' : ''].filter(Boolean).join(' ');
+    out += cls ? `<span class="${cls}">${esc(s)}</span>` : esc(s);
+  };
+  for (let m = re.exec(text); m; m = re.exec(text)) {
+    flush(text.slice(last, m.index));
+    last = re.lastIndex;
+    if (m[2] !== 'm') continue;
+    const codes = (m[1] || '0').split(';').map((n) => Number(n || 0));
+    for (let i = 0; i < codes.length; i++) {
+      const c = codes[i];
+      if (c === 0) { fg = null; bold = false; dim = false; }
+      else if (c === 1) bold = true;
+      else if (c === 2) dim = true;
+      else if (c === 22) { bold = false; dim = false; }
+      else if (c >= 30 && c <= 37) fg = c - 30;
+      else if (c >= 90 && c <= 97) fg = c - 90 + 8;
+      else if (c === 39) fg = null;
+      else if (c === 38 || c === 48) i += codes[i + 1] === 5 ? 2 : codes[i + 1] === 2 ? 4 : 0; // 256-colour / RGB: skip
+    }
+  }
+  flush(text.slice(last));
+  return out;
+}
+
 // git's reflog lines ("checkout: moving from a to b") in plain English.
 function reflogText(action) {
   const a = String(action || '');
@@ -505,5 +562,5 @@ function moveRepo(workspaces, repo, fromId, toId, copy = false) {
 
 if (typeof module !== 'undefined') {
   module.exports = { esc, basename, norm, samePath, plural, timeAgo, parseConflicts, pickLines, myers, diffLines, sideBySide, inlineDiff, toLines, md,
-    langOf, tokenize, highlight, changeRange, parseUnified, pairHunk, lineKeyer, changedLines, partialPatch, workItemFromBranch, withWorkItem, reflogText, prTitleFromBranch, prDraft, graphRows, fuzzyScore, moveRepo };
+    langOf, tokenize, highlight, changeRange, parseUnified, pairHunk, lineKeyer, changedLines, partialPatch, workItemFromBranch, withWorkItem, feedOutput, ansiToHtml, reflogText, prTitleFromBranch, prDraft, graphRows, fuzzyScore, moveRepo };
 }

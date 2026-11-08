@@ -7,6 +7,7 @@ const git = require('./src/git');
 const { ClaudeSession, findClaude, oneShot } = require('./src/claude');
 const ado = require('./src/ado');
 const github = require('./src/github');
+const con = require('./src/console');
 
 let win;
 
@@ -217,6 +218,22 @@ handle('host:createRepo', (kind, opts) => {
   return HOSTS[kind].createRepo({ ...opts, token });
 });
 
+// ---------- console (commands typed by the user) ----------
+// Each run has an id from the page; its output streams back as console:data, then console:exit.
+const consoleRuns = new Map(); // id -> child process
+ipcMain.handle('console:check', (_e, line) => con.check(line));
+ipcMain.handle('console:run', (_e, id, cwd, line) => {
+  const child = con.start({
+    cwd,
+    line,
+    onData: (stream, text) => toWin('console:data', { id, stream, text }),
+    onExit: (code, error) => { consoleRuns.delete(id); toWin('console:exit', { id, code, error }); },
+  });
+  if (child) consoleRuns.set(id, child);
+  return true;
+});
+ipcMain.handle('console:stop', (_e, id) => con.stop(consoleRuns.get(id)));
+
 // ---------- Claude chat panel (Claude Code CLI) ----------
 // One claude process at a time, for the chat the user is in. Each chat has a key; switching
 // chats (or restarting the app) starts a process that resumes that chat's Claude session.
@@ -263,4 +280,4 @@ ipcMain.handle('app:restartToUpdate', () => { try { require('electron-updater').
 ipcMain.handle('app:version', () => app.getVersion());
 
 app.whenReady().then(() => { createWindow(); setTimeout(checkForUpdates, 5000); });
-app.on('window-all-closed', () => { claude?.stop(); for (const w of watchers.values()) w.watcher.close(); app.quit(); });
+app.on('window-all-closed', () => { claude?.stop(); for (const c of consoleRuns.values()) con.stop(c); for (const w of watchers.values()) w.watcher.close(); app.quit(); });
