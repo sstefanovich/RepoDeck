@@ -81,6 +81,7 @@ a { color: var(--accent); }
 .pad { padding: 10px 12px; }
 .spacer { flex: 1; }
 .hint { color: var(--muted); font-size: 12px; margin: 6px 0 0; }
+.hint a[data-url] { white-space: nowrap; }
 
 #app { display: flex; height: 100vh; }
 
@@ -105,6 +106,7 @@ a { color: var(--accent); }
 .btn.ghost:hover:not(:disabled) { background: var(--panel-2); border-color: var(--border); }
 .btn.small { padding: 3px 9px; font-size: 12.5px; }
 .btn.block { display: block; width: 100%; text-align: left; }
+.btn .ico { display: inline-block; width: 1.4em; text-align: center; }
 .btn.grow { flex: 1; }
 .danger-text { color: var(--bad) !important; }
 .icon-btn {
@@ -189,7 +191,7 @@ a { color: var(--accent); }
 .home { padding: 48px; max-width: 1100px; overflow-y: auto; }
 .home h1 { font-size: 28px; margin-bottom: 6px; }
 .lead { font-size: 16px; color: var(--muted); margin-bottom: 28px; }
-.home-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+.home-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 16px; max-width: 860px; }
 .hcard { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px; }
 .hcard h3 { margin-top: 0; color: var(--text); text-transform: none; letter-spacing: 0; font-size: 15px; }
 
@@ -480,7 +482,7 @@ kbd { font: 11.5px var(--mono); padding: 1px 5px; border: 1px solid var(--border
 .menu-sep { height: 1px; background: var(--border); margin: 5px 4px; }
 .switcher-input { margin-bottom: 6px; }
 .switcher-list { overflow-y: auto; min-height: 0; flex: 1; }
-.switcher-foot { display: flex; gap: 6px; justify-content: space-between; border-top: 1px solid var(--border); padding-top: 6px; margin-top: 6px; }
+.switcher-foot { display: flex; flex-wrap: wrap; gap: 6px; justify-content: space-between; border-top: 1px solid var(--border); padding-top: 6px; margin-top: 6px; }
 
 /* ---------- command palette ---------- */
 .palette-back { place-items: start center; padding-top: 12vh; }
@@ -612,6 +614,8 @@ pre.raw { font: 12px/1.45 var(--mono); background: var(--panel-2); padding: 8px 
 .modal-body h3:first-child { margin-top: 0; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 .field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+.modal-body .hint + .field, .modal-body .hint + .setup-grid { margin-top: 10px; }
+.field-value { padding: 7px 0; min-height: 34px; }
 .field > span { font-size: 12.5px; font-weight: 600; }
 .field .check { font-weight: 400; margin: 3px 0; }
 .row-inline { display: flex; gap: 6px; }
@@ -654,6 +658,7 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
 .toast.hide { opacity: 0; transform: translateY(8px); }
 
 ::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-corner { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; border: 2px solid transparent; background-clip: padding-box; }
 ::-webkit-scrollbar-thumb:hover { background-color: var(--muted); }
 .dl.hunk .hunk-discard { flex-shrink: 0; margin: 1px 8px; padding: 0 8px; font: 12px "Segoe UI", system-ui, sans-serif; }
@@ -690,7 +695,7 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
 .pr-chip.muted { color: var(--muted); cursor: default; }
 /* workspace search */
 .ws-search-row { margin-bottom: 12px; }
-.ws-search { width: 100%; max-width: 640px; }
+input.ws-search { width: 100%; max-width: 640px; }
 .ws-results { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 10px 14px; margin-bottom: 14px; }
 .ws-results-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .ws-hit-repo h3 { margin: 12px 0 4px; }
@@ -742,3 +747,4 @@ body.no-ai [data-action="blame-explain"] { display: none !important; }
 .ansi-fg4 { color: var(--ansi-4); } .ansi-fg5 { color: var(--ansi-5); } .ansi-fg6 { color: var(--ansi-6); } .ansi-fg7 { color: var(--ansi-7); }
 .ansi-fg8 { color: var(--ansi-0); opacity: .8; } .ansi-fg9 { color: var(--ansi-1); } .ansi-fg10 { color: var(--ansi-2); } .ansi-fg11 { color: var(--ansi-3); }
 .ansi-fg12 { color: var(--ansi-4); } .ansi-fg13 { color: var(--ansi-5); } .ansi-fg14 { color: var(--ansi-6); } .ansi-fg15 { color: var(--ansi-7); }
+.rec-none { color: var(--ok); font-weight: 600; margin: 0 0 8px; }

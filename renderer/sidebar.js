@@ -303,8 +303,8 @@ function renderHome() {
     <div class="home-cards">
       <div class="hcard"><h3>Already have a repo on your computer?</h3><p>Pick its folder — the one you cloned into. You can also just <b>drag the folder onto this window</b>.</p><button class="btn primary" data-action="open-repo-folder">📂 Open repo folder…</button></div>
       <div class="hcard"><h3>Need to download one?</h3><p>Clone a repo from GitHub, Azure DevOps, GitLab… using its URL.</p><button class="btn" data-action="clone">⤓ Clone a repo</button></div>
-      <div class="hcard"><h3>Starting something new?</h3><p>Turn any folder into a repo, save your files as the first commit, and put it on GitHub or Azure DevOps in one go.</p><button class="btn" data-action="new-repo">✚ New repo from a folder</button></div>
-      <div class="hcard"><h3>Work on several repos together?</h3><p>A <b>workspace</b> groups repos you use together — e.g. the three repos of one project — so you can see them side by side and pull, push or branch all of them at once.</p><button class="btn" data-action="new-ws">＋ New workspace</button></div>
+      <div class="hcard"><h3>Starting something new?</h3><p>Turn any folder into a repo, save your files as the first commit, and put it on GitHub or Azure DevOps in one go.</p><button class="btn" data-action="new-repo">＋ New repo from a folder</button></div>
+      <div class="hcard"><h3>Work on several repos together?</h3><p>A <b>workspace</b> groups repos you use together — e.g. the three repos of one project — so you can see them side by side and pull, push or branch all of them at once.</p><button class="btn" data-action="new-ws">▦ New workspace</button></div>
     </div>
     <p class="hint">Keep coding in VS Code or Cursor as usual — RepoDeck watches your folders and updates by itself. New to git? <a href="#" data-action="help">Git explained</a>.</p>
   </div>`;

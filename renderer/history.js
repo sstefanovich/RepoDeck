@@ -291,7 +291,8 @@ async function recoverLostWork(repo) {
     title: `Recover lost work in ${basename(repo)}`,
     wide: true,
     body: `<p class="intro">Git keeps a diary of everywhere this repo has been for about 90 days, even after a reset, a deleted branch or a rebase. Find the moment before things went wrong and make a branch there to get that work back.</p>
-      <label class="check"><input type="checkbox" id="rec-only-lost" ${lostCount ? 'checked' : ''}> Only show work that isn't on any branch <span class="muted small">(${lostCount})</span></label>
+      ${lostCount ? '' : '<p class="rec-none">✓ Every commit below is still on a branch, so nothing has been lost.</p>'}
+      <label class="check"><input type="checkbox" id="rec-only-lost" ${lostCount ? 'checked' : 'disabled'}> Only show work that isn't on any branch <span class="muted small">(${lostCount})</span></label>
       <div class="rec-list" id="rec-list">${entries.length ? entries.map(row).join('') : '<p class="muted">Nothing recorded yet.</p>'}</div>
       <h3>Deleted Shelf items</h3>
       <div class="rec-list" id="rec-shelf"><p class="muted"><span class="spinner sm"></span> Looking…</p></div>`,
