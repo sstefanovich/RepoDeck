@@ -348,7 +348,7 @@ const isPicked = (repo, file, key) => !!state.checked[repo]?.[file] && !state.ex
 const partlyPicked = (repo, file) => !!state.checked[repo]?.[file] && !!state.excluded[repo]?.[file]?.size;
 
 // Tick (on) or untick lines of the file shown in the diff.
-function pickLines(repo, file, keys, on) {
+function setLinesPicked(repo, file, keys, on) {
   const all = state.diffKeys?.path === file ? state.diffKeys.keys : [];
   const ex = (state.excluded[repo] ||= {});
   const checked = (state.checked[repo] ||= {});

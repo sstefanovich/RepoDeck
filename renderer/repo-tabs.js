@@ -327,6 +327,7 @@ function renderConflictsTab() {
     <div class="pane-right" id="conflict-pane"></div>
   </div>`;
   renderConflictList();
+  if (state.conflict && !state.conflict.loading) renderConflictPane();
 }
 
 function renderConflictList() {
@@ -348,6 +349,8 @@ async function openConflict(file) {
   const view = state.conflictView || 'steps';
   state.conflict = { file, loading: true, choices: {}, custom: {}, view };
   renderConflictList();
+  const pane = $('#conflict-pane');
+  if (pane) { pane.innerHTML = '<div class="empty muted"><span class="spinner"></span></div>'; delete pane.dataset.view; }
   let data;
   try { data = await gitRaw('readConflict', repo, file); }
   catch (e) { showError("Couldn't read the file", e); return; }
@@ -375,11 +378,6 @@ function buildResult(c) {
 }
 
 const fileEol = (c) => c.parsed?.eol || ((c.data.content || '').includes('\r\n') ? '\r\n' : '\n');
-
-
-
-
-
 
 const XY_TEXT = {
   UU: () => 'Both sides changed this file.',
