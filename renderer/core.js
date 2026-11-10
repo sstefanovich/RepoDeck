@@ -153,7 +153,7 @@ const editorName = () => EDITORS[state.config.settings.editor] || state.config.s
 const FRIENDLY = [
   [/Please tell me who you are|empty ident|unable to auto-detect email/i, 'Git needs your name and email before it can save commits. They are stamped on every commit so others know who made it.'],
   [/would be overwritten by (checkout|merge|switch)|Your local changes to the following files would be overwritten/i, 'You have uncommitted changes in files that this would also change, so git stopped to protect your work. Commit them or put them on the Shelf, then try again.'],
-  [/\[rejected\]|fetch first|non-fast-forward/i, "The server has commits you don't have yet. Get latest first, then send again."],
+  [/\[rejected\]|Updates were rejected|fetch first|non-fast-forward/i, "The server has commits you don't have yet. Get latest first, then send again."],
   [/Authentication failed|could not read Username|Permission denied \(publickey\)|terminal prompts disabled|403/i, "Git couldn't log in to the server. Your saved login may have expired. Send, Get latest or Check for updates on this repo offers to sign in again."],
   [/not fully merged/i, "This branch has commits that aren't in any other branch yet. Deleting it would lose them."],
   [/already exists/i, 'Something with that name already exists.'],

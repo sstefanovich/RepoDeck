@@ -150,19 +150,21 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && popoverE
 
 function openMenu(anchor, repo) {
   const st = state.status[repo] || {};
-  const item = (action, label, extra = '') => `<button class="menu-item" role="menuitem" data-action="${action}" data-repo="${esc(repo)}" ${extra}>${label}</button>`;
+  const item = (action, label, hint = '') => `<button class="menu-item" role="menuitem" data-action="${action}" data-repo="${esc(repo)}"><span>${label}</span>${hint ? `<span class="muted small">${hint}</span>` : ''}</button>`;
   popover(anchor, `<div role="menu">
     ${item('open-editor', `Open in ${esc(editorName())}`)}
     ${item('open-folder', 'Show in File Explorer')}
     ${item('open-terminal', 'Open a terminal here')}
     ${st.hasRemote ? item('open-web', 'Open the repo website') : ''}
-    ${st.upstream && st.branch ? item('open-pr', `Open a pull request for ${esc(st.branch)}`) : ''}
-    ${st.branch ? item('update-from', `Update ${esc(st.branch)} from another branch…`) : ''}
-    ${st.branch ? item('finish-branch', `Finish ${esc(st.branch)} (after its pull request)…`) : ''}
+    <div class="menu-sep"></div>
+    ${st.upstream && st.branch ? item('open-pr', 'Pull request for this branch…') : ''}
+    ${st.branch ? item('update-from', 'Update this branch from…') : ''}
+    ${st.branch ? item('finish-branch', 'Finish this branch…', 'after its PR') : ''}
     ${item('compare', 'Compare branches')}
     ${item('recover', 'Recover lost work…')}
-    ${item('console-toggle', 'Git console (Ctrl+`)')}
-  </div>`, { width: 260, onOpen: (el) => el.querySelector('button')?.focus() });
+    <div class="menu-sep"></div>
+    ${item('console-toggle', 'Git console', 'Ctrl+`')}
+  </div>`, { width: 270, onOpen: (el) => el.querySelector('button')?.focus() });
 }
 
 // Quick branch switcher: type to filter, Enter to switch.
@@ -181,7 +183,7 @@ async function openBranchSwitcher(anchor, repo) {
   popover(anchor, `<input class="switcher-input" placeholder="Find a branch…" spellcheck="false" aria-label="Find a branch">
     <div class="switcher-list" role="listbox">${render('')}</div>
     <div class="switcher-foot"><button class="btn small" data-action="new-branch" data-repo="${esc(repo)}">＋ New branch…</button>${st.branch ? `<button class="btn small ghost" data-action="update-from" data-repo="${esc(repo)}" title="Bring in the new commits from another branch">⤓ Update from…</button>` : ''}<button class="btn small ghost" data-action="tab" data-tab="branches">All branches…</button></div>`, {
-    width: 320,
+    width: 360,
     onOpen: (el) => {
       const input = el.querySelector('input');
       input.focus();

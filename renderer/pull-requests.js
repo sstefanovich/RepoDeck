@@ -44,7 +44,7 @@ async function createPrDialog(repo, info) {
     title: `Create a pull request on ${ado ? 'Azure DevOps' : 'GitHub'}`,
     wide: true,
     body: `<div class="setup-grid">
-        <div class="field"><span>From</span><div><b>${esc(st.branch)}</b></div></div>
+        <div class="field"><span>From</span><div class="field-value"><b>${esc(st.branch)}</b></div></div>
         <label class="field"><span>Into</span><select name="target">${targets.map((b) => `<option ${b === target0 ? 'selected' : ''}>${esc(b)}</option>`).join('')}</select></label>
       </div>
       <p class="hint" id="pr-summary">${summary(cmp)}</p>

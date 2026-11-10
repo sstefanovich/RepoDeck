@@ -219,12 +219,12 @@ const actions = {
     afterPick();
   },
   'check-all': (t) => { const repo = currentRepo(); const c = state.checked[repo]; for (const k of Object.keys(c)) c[k] = t.checked; clearPicks(repo); afterPick(); },
-  'pick-line': (t) => { const k = state.diffKeys; if (k) { pickLines(k.repo, k.path, [t.dataset.key], t.checked); afterPick(); } },
+  'pick-line': (t) => { const k = state.diffKeys; if (k) { setLinesPicked(k.repo, k.path, [t.dataset.key], t.checked); afterPick(); } },
   'pick-hunk': (t) => {
     const k = state.diffKeys;
     if (!k) return;
     const keys = [...document.querySelectorAll(`#diff-pane .dl[data-h="${t.dataset.h}"] [data-action=pick-line]`)].map((b) => b.dataset.key);
-    pickLines(k.repo, k.path, keys, t.checked);
+    setLinesPicked(k.repo, k.path, keys, t.checked);
     afterPick();
   },
   commit: () => doCommit(currentRepo(), false),
@@ -358,6 +358,9 @@ document.addEventListener('click', (e) => {
   if (!t || t.disabled || t.closest('.modal-backdrop')) return;
   const fn = actions[t.dataset.action];
   if (!fn) return;
+  // A choice in a menu or the branch switcher closes it first, so whatever opens next
+  // (a dialog, another menu) isn't left underneath it.
+  if (t.closest('.popover')) closePopover();
   if (e.shiftKey && t.tagName === 'BUTTON') {
     e.preventDefault();
     state.previewOnce = true;
