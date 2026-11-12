@@ -147,8 +147,8 @@ async function wsCommit() {
 // A pull request from each repo's branch, with the same title and description (one feature across repos).
 async function wsPullRequests() {
   const w = currentWs();
-  const MAIN = ['main', 'master', 'develop'];
-  const repos = w.repos.filter((p) => { const st = state.status[p] || {}; return st.hasRemote && st.branch && !MAIN.includes(st.branch) && !st.error && !st.missing; });
+  const MAIN = ['main', 'master', 'develop', 'dev'];
+  const repos = w.repos.filter((p) => { const st = state.status[p] || {}; return st.hasRemote && st.branch && !isBase(st.branch) && !st.error && !st.missing; });
   if (!repos.length) { toast('No repo is on a feature branch that is on a server.', 'info'); return; }
   const rows = await Promise.all(repos.map(async (repo) => {
     const st = state.status[repo];
@@ -344,21 +344,22 @@ async function wsNewBranch() {
   const r = await modal({
     title: 'New branch in several repos',
     body: `<label class="field"><span>Branch name</span><input name="name" placeholder="e.g. feature/new-checkout" spellcheck="false"></label>
+      <div class="name-advice" id="name-advice"></div>
       <div class="field"><span>Create it in</span>${w.repos.map((p) => `<label class="check"><input type="checkbox" name="repos" data-multi="1" value="${esc(p)}" checked> ${esc(basename(p))} <span class="muted small">(from ${esc(state.status[p]?.branch || '?')})</span></label>`).join('')}</div>
       <p class="hint">Each repo gets the branch starting from whatever branch it's on now, and switches to it. Uncommitted changes come along.</p>`,
     buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'ok', label: 'Create', kind: 'primary' }],
-    init: (el) => { const i = el.querySelector('[name=name]'); i.addEventListener('input', () => { i.value = branchTransform(i.value); }); },
+    init: (el) => wireBranchName(el.querySelector('[name=name]'), el.querySelector('#name-advice'), { local: [], remote: [] }),
   });
   if (r.id !== 'ok' || !r.values.name) return;
-  const name = r.values.name;
-  if (!(await git('checkBranchName', name))) { showError('Invalid branch name', new Error(`fatal: '${name}' is not a valid branch name`)); return; }
+  const name = await confirmBranchName(r.values.name.trim(), { local: [], remote: [] });
+  if (!name) return;
   const results = await forEachRepo('Creating branch…', r.values.repos || [], async (repo) => { await git('createBranch', repo, name, null); return { ok: true, msg: `created ${name}` }; }, (repo) => ['createBranch', repo, name, null]);
   if (results) resultsModal('New branch — results', results);
 }
 
 // Delete branches that are merged into the main branch or were deleted on the server.
 async function tidyBranches(repos) {
-  const found = await Promise.all(repos.map(async (repo) => ({ repo, ...(await gitRaw('tidyCandidates', repo).catch(() => ({ branches: [] }))) })));
+  const found = await Promise.all(repos.map(async (repo) => ({ repo, ...(await gitRaw('tidyCandidates', repo, baseBranchNames(basePatterns())).catch(() => ({ branches: [] }))) })));
   const total = found.reduce((n, f) => n + f.branches.length, 0);
   if (!total) { toast('Nothing to tidy — no merged or deleted-on-server branches.', 'ok'); return; }
   const r = await modal({
@@ -383,6 +384,7 @@ async function tidyBranches(repos) {
   }
   await refreshAll();
   if (state.tab === 'branches') loadBranches();
+  for (const repo of new Set(deleted.map((d) => d.repo))) recheckShelf(repo);
   if (failed.length) showError(`Couldn't delete ${plural(failed.length, 'branch', 'branches')}`, new Error(failed.join('\n')));
   if (deleted.length) {
     const entry = recordUndo({

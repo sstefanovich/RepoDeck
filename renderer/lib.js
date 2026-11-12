@@ -560,7 +560,78 @@ function moveRepo(workspaces, repo, fromId, toId, copy = false) {
   return added || removed;
 }
 
+// Branches work shouldn't go on directly (it reaches them through pull requests). Space-separated, * matches anything.
+const DEFAULT_BASE_BRANCHES = 'main master dev develop';
+
+function isBaseBranch(name, patterns = DEFAULT_BASE_BRANCHES) {
+  if (!name) return false;
+  return String(patterns || '').split(/\s+/).filter(Boolean).some((p) => {
+    const re = new RegExp(`^${p.split('*').map((s) => s.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*')}$`, 'i');
+    return re.test(name);
+  });
+}
+
+// The plain names in the base-branch list (no wildcards), which can be looked up as branches.
+const baseBranchNames = (patterns = DEFAULT_BASE_BRANCHES) => String(patterns || '').split(/\s+/).filter((p) => p && !p.includes('*'));
+
+// Whether work on the current branch looks like it's in the wrong place:
+//   { kind: 'base' }                      — editing (or holding unsent commits on) main, dev…
+//   { kind: 'finished', why, into }       — the branch is done: deleted on the server ('gone'),
+//                                           its pull request completed ('pr'), or merged into a base branch ('merged')
+// Only when there's something to move (uncommitted changes, or unsent commits on a base branch), and only
+// for repos with a server: a repo that lives only on this computer has no pull requests to go through.
+// opts: { patterns, changes (count of uncommitted files), prDone, mergedInto }
+function branchWarning(st, { patterns = DEFAULT_BASE_BRANCHES, changes = 0, prDone = false, mergedInto = null } = {}) {
+  if (!st || st.error || st.missing || st.detached || st.initial || st.op || !st.branch || !st.hasRemote) return null;
+  if (isBaseBranch(st.branch, patterns)) {
+    const unsent = st.upstream && !st.upstreamGone ? st.ahead || 0 : 0;
+    return changes || unsent ? { kind: 'base', changes, unsent } : null;
+  }
+  if (!changes) return null;
+  if (st.upstreamGone) return { kind: 'finished', why: 'gone', into: mergedInto, changes };
+  if (prDone) return { kind: 'finished', why: 'pr', into: mergedInto, changes };
+  if (mergedInto) return { kind: 'finished', why: 'merged', into: mergedInto, changes };
+  return null;
+}
+
+// How new branch names usually start (Settings → Branches). Empty means any name is fine.
+const DEFAULT_BRANCH_PREFIXES = 'feature/ fix/ bugfix/ hotfix/ chore/ docs/ refactor/ test/ release/ users/';
+
+// Advice about a new branch name, most serious first. Each: { kind, severe, msg, suggest? }.
+//   exists  (severe) — a branch with that name is already here
+//   remote           — it's already on the server (you probably want to switch to it)
+//   base             — it's one of the shared branches
+//   prefix           — it doesn't start the way branch names here do (suggest: the name with the first prefix)
+// opts: { prefixes, patterns (base branches), local: names here, remote: names on the server (without "origin/") }
+function branchNameIssues(name, { prefixes = DEFAULT_BRANCH_PREFIXES, patterns = DEFAULT_BASE_BRANCHES, local = [], remote = [] } = {}) {
+  const n = String(name || '').trim();
+  if (!n) return [];
+  const same = (x) => x.toLowerCase() === n.toLowerCase();
+  const out = [];
+  if (local.some(same)) out.push({ kind: 'exists', severe: true, msg: `There's already a branch called ${n} here.` });
+  else if (remote.some(same)) out.push({ kind: 'remote', msg: `${n} is already on the server. To work on it, switch to it instead of starting a new one.` });
+  if (isBaseBranch(n, patterns)) out.push({ kind: 'base', msg: `${n} is one of your shared branches (Settings → Branches), which work doesn't usually go on directly.` });
+  const list = String(prefixes || '').split(/\s+/).filter(Boolean);
+  if (list.length && !isBaseBranch(n, patterns) && !list.some((p) => n.toLowerCase().startsWith(p.toLowerCase()))) {
+    // "login" → "feature/login"; "feat/login" → "feature/login" (a near miss of a prefix is replaced, not doubled).
+    const slash = n.indexOf('/');
+    const head = slash >= 3 ? n.slice(0, slash + 1).toLowerCase() : '';
+    const near = head && list.find((p) => p.toLowerCase().startsWith(head.slice(0, -1)) || head.startsWith(p.toLowerCase().slice(0, -1)));
+    const suggest = near ? near + n.slice(slash + 1) : list[0] + n;
+    out.push({ kind: 'prefix', msg: `Branch names here usually start with ${list.slice(0, 4).join(', ')}${list.length > 4 ? '…' : ''}`, suggest });
+  }
+  return out;
+}
+
+// Shelf items set aside on branches that no longer exist here (left behind, never restored).
+// The safety copies made by Discard don't count: those are kept on purpose.
+function orphanedShelf(stashes, localNames) {
+  const have = new Set(localNames);
+  return (stashes || []).filter((s) => s.branch && s.branch !== '(no branch)' && !/^\[discarded\]/.test(s.message) && !have.has(s.branch));
+}
+
 if (typeof module !== 'undefined') {
   module.exports = { esc, basename, norm, samePath, plural, timeAgo, parseConflicts, pickLines, myers, diffLines, sideBySide, inlineDiff, toLines, md,
-    langOf, tokenize, highlight, changeRange, parseUnified, pairHunk, lineKeyer, changedLines, partialPatch, workItemFromBranch, withWorkItem, feedOutput, ansiToHtml, reflogText, prTitleFromBranch, prDraft, graphRows, fuzzyScore, moveRepo };
+    langOf, tokenize, highlight, changeRange, parseUnified, pairHunk, lineKeyer, changedLines, partialPatch, workItemFromBranch, withWorkItem, feedOutput, ansiToHtml, reflogText, prTitleFromBranch, prDraft, graphRows, fuzzyScore, moveRepo,
+    DEFAULT_BASE_BRANCHES, isBaseBranch, baseBranchNames, branchWarning, DEFAULT_BRANCH_PREFIXES, branchNameIssues, orphanedShelf };
 }

@@ -433,17 +433,18 @@ const ops = {
   async defaultBranch(repo) {
     const r = await run(repo, ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'], { quiet: true });
     if (r.ok && r.stdout.trim()) return r.stdout.trim().replace(/^origin\//, '');
-    for (const b of ['main', 'master', 'develop']) {
+    for (const b of ['main', 'master', 'develop', 'dev']) {
       if ((await run(repo, ['rev-parse', '--verify', '-q', `refs/heads/${b}`], { quiet: true })).ok) return b;
     }
     return null;
   },
 
   // Local branches that are probably safe to delete: gone from the server, or fully merged into the default branch.
-  async tidyCandidates(repo) {
+  // keepAlso: more branch names never to suggest (the user's base branches).
+  async tidyCandidates(repo, keepAlso = []) {
     const def = await ops.defaultBranch(repo);
     const { local } = await ops.branches(repo);
-    const keep = new Set(['main', 'master', 'develop', def].filter(Boolean));
+    const keep = new Set(['main', 'master', 'develop', 'dev', def, ...keepAlso].filter(Boolean));
     const merged = new Set();
     if (def) {
       const r = await run(repo, ['for-each-ref', '--format=%(refname:short)', `--merged=refs/heads/${def}`, 'refs/heads'], { quiet: true });
@@ -713,6 +714,116 @@ const ops = {
     const slash = st.upstream ? st.upstream.indexOf('/') : -1;
     if (deleteRemote && slash > 0 && !st.upstreamGone) await must(repo, ['push', st.upstream.slice(0, slash), '--delete', st.upstream.slice(slash + 1)]);
     return { ok: true, branch, target, oid, pulled: pulled ? !!pulled.ok : null };
+  },
+
+  // Which of `bases` (e.g. ['dev', 'main']) the current branch's work is already in, or null.
+  // Only for a published branch that has commits of its own: a branch just made from dev (and maybe
+  // published straight away) is "in" dev too, but that's because nothing has been done on it yet.
+  async branchMerged(repo, bases = []) {
+    const st = await ops.status(repo);
+    if (!st.branch || st.initial || st.detached || !st.upstream || bases.includes(st.branch)) return null;
+    // Where the branch started: the oldest entry in its reflog (git keeps these for 90 days).
+    const log = await run(repo, ['reflog', 'show', '--format=%H', `refs/heads/${st.branch}`, '--'], { quiet: true });
+    const first = log.ok ? log.stdout.trim().split(/\r?\n/).pop() : '';
+    if (!first || first === st.oid) return null;
+    const remote = st.upstream.slice(0, Math.max(0, st.upstream.indexOf('/'))) || 'origin';
+    for (const b of bases) {
+      for (const ref of [`refs/remotes/${remote}/${b}`, `refs/heads/${b}`]) {
+        if (!(await run(repo, ['rev-parse', '--verify', '-q', ref], { quiet: true })).ok) continue;
+        if ((await run(repo, ['merge-base', '--is-ancestor', st.oid, ref], { quiet: true })).ok) return b;
+      }
+    }
+    return null;
+  },
+
+  // How far the current branch has fallen behind the branch it was started from.
+  // Candidates: `prefer` (a ref such as origin/dev, e.g. the one last used for Update from), then each of
+  // `bases` (the server's copy if there is one, else the local branch). Without a preference, the base is
+  // the one the branch split from most recently: a branch made from dev shares newer history with dev than with main.
+  // Returns { ref, name, behind } (ref as Update from lists it, e.g. "origin/dev"), or null.
+  async branchBehind(repo, bases = [], prefer = null) {
+    const st = await ops.status(repo);
+    if (!st.branch || st.initial || st.detached || bases.includes(st.branch)) return null;
+    const remote = st.upstream ? st.upstream.slice(0, Math.max(0, st.upstream.indexOf('/'))) || 'origin' : 'origin';
+    const exists = async (ref) => (await run(repo, ['rev-parse', '--verify', '-q', ref], { quiet: true })).ok;
+    const refs = [];
+    if (prefer && prefer !== st.upstream && (await exists(prefer))) refs.push({ ref: prefer, name: prefer.startsWith(`${remote}/`) ? prefer.slice(remote.length + 1) : prefer, preferred: true });
+    for (const b of bases) {
+      if (b === st.branch) continue;
+      if (await exists(`refs/remotes/${remote}/${b}`)) refs.push({ ref: `${remote}/${b}`, name: b });
+      else if (await exists(`refs/heads/${b}`)) refs.push({ ref: b, name: b });
+    }
+    let best = null;
+    for (const c of refs) {
+      const mb = await run(repo, ['merge-base', 'HEAD', c.ref], { quiet: true });
+      if (!mb.ok) continue;
+      const depth = Number((await run(repo, ['rev-list', '--count', mb.stdout.trim()], { quiet: true })).stdout.trim()) || 0;
+      const behind = Number((await run(repo, ['rev-list', '--count', `HEAD..${c.ref}`], { quiet: true })).stdout.trim()) || 0;
+      const x = { ...c, depth, behind };
+      if (c.preferred) { best = x; break; }
+      if (!best || depth > best.depth || (depth === best.depth && behind > best.behind)) best = x;
+    }
+    return best ? { ref: best.ref, name: best.name, behind: best.behind } : null;
+  },
+
+  // Moves work that was started on the wrong branch onto a new one.
+  //  start null: the new branch starts here, so uncommitted changes and commits come along as they are.
+  //              With moveCommits, the old branch then goes back to match the server (its unsent commits
+  //              now live only on the new branch).
+  //  start ref:  the new branch starts from `start` (e.g. origin/dev) and the uncommitted changes are
+  //              carried over (set aside and put back; clashes become conflicts).
+  // Returns what undoMoveToNewBranch needs.
+  async moveToNewBranch(repo, { name, start = null, moveCommits = false }) {
+    const st = await ops.status(repo);
+    if (st.op || st.conflicted.length) throw new GitError('Finish or abort what is in progress first (see the yellow banner).');
+    if (!st.branch) throw new GitError("You're not on a branch.");
+    const from = st.branch;
+    const oid = st.oid;
+    if (!start) {
+      await must(repo, ['switch', '-c', name, '--no-track']);
+      let moved = 0;
+      let fromNow = oid;
+      if (moveCommits && st.upstream && !st.upstreamGone && st.ahead) {
+        await must(repo, ['branch', '-f', from, st.upstream]);
+        moved = st.ahead;
+        fromNow = (await must(repo, ['rev-parse', `refs/heads/${from}`], { quiet: true })).stdout.trim();
+      }
+      return { ok: true, from, name, oid, moved, fromNow };
+    }
+    const dirty = st.staged.length + st.unstaged.length + st.untracked.length > 0;
+    if (dirty) await must(repo, ['stash', 'push', '--include-untracked', '-m', movedShelfMessage(from, name)]);
+    const sw = await run(repo, ['switch', '-c', name, '--no-track', start]);
+    if (!sw.ok) {
+      if (dirty) await run(repo, ['stash', 'pop']);
+      throw new GitError(sw.stderr);
+    }
+    const res = dirty ? await withConflicts(repo, await run(repo, ['stash', 'pop'])) : { ok: true };
+    return { ...res, from, name, oid, moved: 0 };
+  },
+
+  // Puts things back after moveToNewBranch: the old branch where it was, back on it with the
+  // uncommitted changes, and the new branch deleted.
+  async undoMoveToNewBranch(repo, { from, name, oid, moved = 0, fromNow = null }) {
+    const st = await ops.status(repo);
+    if (st.branch !== name) throw new GitError(`You're no longer on ${name}, so this can't be undone safely.`);
+    if (moved) {
+      // Only if nothing has moved the old branch since (e.g. Get latest), or those commits would be dropped.
+      const at = (await run(repo, ['rev-parse', '--verify', '-q', `refs/heads/${from}`], { quiet: true })).stdout.trim();
+      if (fromNow && at !== fromNow) throw new GitError(`${from} has changed since, so putting its commits back could lose newer ones.`);
+      await must(repo, ['branch', '-f', from, oid]);
+    }
+    const dirty = st.staged.length + st.unstaged.length + st.untracked.length > 0;
+    const sw = await run(repo, ['switch', from]);
+    let res = { ok: true };
+    if (!sw.ok) {
+      if (!dirty) throw new GitError(sw.stderr);
+      await must(repo, ['stash', 'push', '--include-untracked', '-m', movedShelfMessage(name, from)]);
+      const again = await run(repo, ['switch', from]);
+      if (!again.ok) { await run(repo, ['stash', 'pop']); throw new GitError(again.stderr); }
+      res = await withConflicts(repo, await run(repo, ['stash', 'pop']));
+    }
+    await must(repo, ['branch', '-D', name]);
+    return res;
   },
 
   // Commits on this branch that haven't been sent, oldest first — the ones that are safe to rewrite.
@@ -1209,6 +1320,8 @@ const ops = {
 // offer restoring them when you come back to the branch.
 const autoShelfMessage = (from, to) => `[auto] ${from}: left behind when switching to ${to}`;
 const revertShelfMessage = (branch) => `[auto] ${branch}: set aside while reversing a commit`;
+// Not "[auto] …": these are put back straight away, and only stay on the Shelf if that clashed.
+const movedShelfMessage = (from, to) => `[moving] changes from ${from} to ${to}`;
 
 // The rebase to-do list for tidyCommits, and the message files its "exec" lines read ({dir} is
 // replaced with their folder). A message is applied after the last commit squashed into it.
@@ -1349,6 +1462,27 @@ const plans = {
       ...(deleteRemote && slash > 0 && !st.upstreamGone ? [step(['push', st.upstream.slice(0, slash), '--delete', st.upstream.slice(slash + 1)], 'Also delete it on the server.')] : []),
     ];
   },
+  async moveToNewBranch(repo, { name, start = null, moveCommits = false }) {
+    const st = await ops.status(repo);
+    if (!start) {
+      return [
+        step(['switch', '-c', name, '--no-track'], `Create ${name} right where ${st.branch} is, and switch to it. Your uncommitted changes and commits come along.`),
+        ...(moveCommits && st.upstream && !st.upstreamGone && st.ahead
+          ? [step(['branch', '-f', st.branch, st.upstream], `Put ${st.branch} back to match the server (${st.upstream}). Its ${st.ahead} unsent commit${st.ahead === 1 ? '' : 's'} now live only on ${name}.`)] : []),
+      ];
+    }
+    const dirty = st.staged.length + st.unstaged.length + st.untracked.length > 0;
+    return [
+      ...(dirty ? [step(['stash', 'push', '--include-untracked', '-m', movedShelfMessage(st.branch, name)], 'Set your uncommitted changes aside for a moment.')] : []),
+      step(['switch', '-c', name, '--no-track', start], `Create ${name} from ${start} and switch to it. ${st.branch} is not changed.`),
+      ...(dirty ? [step(['stash', 'pop'], `Put your changes back, now on ${name}. If they clash with ${start}, you'll be asked what to keep.`)] : []),
+    ];
+  },
+  undoMoveToNewBranch: (repo, { from, name, oid, moved = 0 }) => [
+    ...(moved ? [step(['branch', '-f', from, oid.slice(0, 10)], `Put ${from} back where it was, with its commits.`)] : []),
+    step(['switch', from], `Go back to ${from}. Uncommitted changes come along.`),
+    step(['branch', '-D', name], `Delete ${name}.`),
+  ],
   createTag: (repo, name, hash, message = '') => [step(message ? ['tag', '-a', name, '-m', firstLine(message), hash.slice(0, 10)] : ['tag', name, hash.slice(0, 10)],
     `Put the label ${name} on that commit${message ? ', with your message, author and date' : ''}. It stays on your computer until you send it.`)],
   pushTag: (repo, name) => [step(['push', 'origin', `refs/tags/${name}`], `Send the tag ${name} to the server.`)],

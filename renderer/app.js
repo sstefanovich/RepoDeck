@@ -113,7 +113,16 @@ const actions = {
   'blame-mode': (t) => { state.blame = !!t.dataset.on; renderHistoryTab(); },
   'blame-commit': (t) => { state.blame = false; state.selCommit = t.dataset.hash; renderHistoryTab(); },
   'blame-explain': (t) => askClaude(`In ${state.histFile}, lines ${t.dataset.from}–${t.dataset.to} were last changed by commit ${t.dataset.hash.slice(0, 10)}. Explain in plain English what that commit did to those lines and why it was probably done. Look at it with git show.`),
-  'update-from': (t) => { closePopover(); updateFrom(t.dataset.repo || currentRepo()); },
+  'update-from': (t) => { closePopover(); updateFrom(t.dataset.repo || currentRepo(), t.dataset.ref || null); },
+  'behind-ok': (t) => {
+    const repo = t.dataset.repo || currentRepo();
+    state.warnOk.add(`behind|${warnKey(repo, state.status[repo]?.branch)}`);
+    updateRepoChrome();
+  },
+  'shelf-ok': (t) => {
+    for (const s of shelfOrphans(t.dataset.repo || currentRepo())) state.shelfOk.add(s.oid);
+    updateRepoChrome();
+  },
   'ws-update-from': () => wsUpdateFrom(),
   'finish-branch': (t) => { closePopover(); finishBranch(t.dataset.repo || currentRepo()); },
   'ws-finish': () => wsFinish(),
@@ -239,6 +248,12 @@ const actions = {
   },
   shelve: (t) => shelve(t.dataset.repo || currentRepo()),
   'new-branch': (t) => newBranch(t.dataset.repo || currentRepo()),
+  'move-to-branch': (t) => moveToNewBranch(t.dataset.repo || currentRepo()),
+  'warn-ok': (t) => {
+    const repo = t.dataset.repo || currentRepo();
+    state.warnOk.add(warnKey(repo, state.status[repo]?.branch));
+    onStatusChanged([repo]);
+  },
   'switch-branch': (t) => switchBranch(currentRepo(), t.dataset.name),
   'switch-remote': (t) => switchBranch(currentRepo(), t.dataset.branch, t.dataset.name),
   'merge-branch': (t) => mergeBranch(currentRepo(), t.dataset.name),

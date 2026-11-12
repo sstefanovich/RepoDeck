@@ -17,7 +17,7 @@ const MUTATING = new Set([
   'renameBranch', 'deleteBranch', 'merge', 'undoLastCommit', 'stashSave', 'stashApply', 'stashPop', 'stashDrop',
   'resolveSide', 'saveResolution', 'markResolved', 'abortOp', 'continueOp', 'skipOp', 'cherryPick', 'cherryPickOnto',
   'clone', 'init', 'setIdentity', 'resetTo', 'restoreBranch', 'stashStore', 'updateFrom', 'revertCommit', 'finishBranch', 'discardLines', 'applyPatch', 'tidyCommits', 'createTag', 'pushTag', 'deleteTag', 'restoreTag',
-  'setupRepo', 'joinServerHistory', 'useHttps',
+  'setupRepo', 'joinServerHistory', 'useHttps', 'moveToNewBranch', 'undoMoveToNewBranch',
 ]);
 let previewSuppressed = 0;
 const CANCELLED = 'CANCELLED';
@@ -122,7 +122,107 @@ const state = {
   branchFilter: '',   // Branches tab: filter text
   histFile: null,     // History: only commits touching this file
   histQuery: '',      // History: search text
+  merged: {},         // norm(repo) -> { key, into }: which base branch the current branch is already merged into
+  warnOk: new Set(),  // "repo|branch" the user chose to keep working on despite the warning (this session)
+  behind: {},         // norm(repo) -> { key, branch, info: { ref, name, behind } }: how far the branch is behind its base
+  shelfCheck: {},     // norm(repo) -> { key, orphans }: Shelf items from branches that no longer exist
+  shelfOk: new Set(), // Shelf item ids (oid) the user said not to warn about again (this session)
 };
+
+// ---------- a branch falling behind its base ----------
+// Warn once a feature branch is this many commits behind (Settings → Branches; 0 = never).
+const behindLimit = () => { const n = state.config.settings.behindWarn; return n == null ? 20 : Math.max(0, Number(n) || 0); };
+async function loadBehind(repo) {
+  const st = state.status[repo];
+  if (!st || !st.branch || st.op || st.detached || st.initial || isBase(st.branch) || !behindLimit()) return;
+  const key = `${st.branch}|${st.oid}|${state.lastFetch[repo] || 0}`;
+  const had = state.behind[norm(repo)];
+  if (had?.key === key) return;
+  const before = had?.branch === st.branch ? had.info : null;
+  state.behind[norm(repo)] = { key, branch: st.branch, info: before };
+  const prefer = state.config.updateFrom?.[`${norm(repo)}|${st.branch}`] || null;
+  const info = await gitRaw('branchBehind', repo, baseBranchNames(basePatterns()), prefer).catch(() => null);
+  if (state.behind[norm(repo)]?.key !== key) return;
+  state.behind[norm(repo)].info = info;
+  if (JSON.stringify(info) !== JSON.stringify(before)) redrawRepoChrome(repo);
+}
+
+// { ref, name, behind } when the current branch is far enough behind its base to mention.
+function behindWarning(repo) {
+  const st = state.status[repo] || {};
+  const b = state.behind[norm(repo)];
+  const limit = behindLimit();
+  if (!limit || st.op || b?.branch !== st.branch || !b.info || b.info.behind < limit) return null;
+  return state.warnOk.has(`behind|${warnKey(repo, st.branch)}`) ? null : b.info;
+}
+
+// ---------- Shelf items left on branches that are gone ----------
+async function loadShelfCheck(repo, force = false) {
+  const st = state.status[repo];
+  if (!st || st.error || st.missing) return;
+  if (!st.stashCount) { delete state.shelfCheck[norm(repo)]; return; }
+  // The list changes when items are added or removed; branches go when switching away (Finish) or on a fetch (Tidy up after it).
+  const key = `${st.stashCount}|${st.branch}|${state.lastFetch[repo] || 0}`;
+  const had = state.shelfCheck[norm(repo)];
+  if (had?.key === key && !force) return;
+  state.shelfCheck[norm(repo)] = { key, orphans: had?.orphans || [] };
+  const [stashes, b] = await Promise.all([gitRaw('stashList', repo).catch(() => []), gitRaw('branches', repo).catch(() => null)]);
+  if (state.shelfCheck[norm(repo)]?.key !== key || !b) return;
+  const orphans = orphanedShelf(stashes, b.local.map((x) => x.name));
+  const changed = orphans.map((s) => s.oid).join() !== (had?.orphans || []).map((s) => s.oid).join();
+  state.shelfCheck[norm(repo)].orphans = orphans;
+  if (changed) redrawRepoChrome(repo);
+}
+
+// After deleting branches: their Shelf items may now be left over.
+const recheckShelf = (repo) => loadShelfCheck(repo, true);
+
+const shelfOrphans = (repo) => (state.shelfCheck[norm(repo)]?.orphans || []).filter((s) => !state.shelfOk.has(s.oid));
+
+function redrawRepoChrome(repo) {
+  if (samePath(repo, currentRepo()) && $('#repo-header')) updateRepoChrome();
+  if (state.view.type === 'repo' && state.tab === 'shelf' && samePath(repo, currentRepo())) renderShelfTab();
+}
+
+// ---------- work in the wrong place ----------
+// Branches work shouldn't go on directly (main, dev…), from Settings.
+const basePatterns = () => state.config.settings.baseBranches ?? DEFAULT_BASE_BRANCHES;
+const isBase = (branch) => isBaseBranch(branch, basePatterns());
+const warnKey = (repo, branch) => `${norm(repo)}|${branch}`;
+
+// Whether the work in this repo looks like it's on the wrong branch (see branchWarning in lib.js),
+// unless warnings are off or the user said to keep working there.
+function workWarning(repo, { ignoreDismissed = false } = {}) {
+  const st = state.status[repo];
+  if (!st || state.config.settings.warnBranches === false) return null;
+  if (!ignoreDismissed && state.warnOk.has(warnKey(repo, st.branch))) return null;
+  const pr = state.prStatus[norm(repo)];
+  const m = state.merged[norm(repo)];
+  return branchWarning(st, {
+    patterns: basePatterns(),
+    changes: changedFiles(st).length,
+    prDone: pr?.branch === st.branch && pr.status === 'completed',
+    mergedInto: m?.branch === st.branch ? m.into : null,
+  });
+}
+
+// Works out (in the background) whether the current branch is already merged into a base branch.
+// Cached until the branch, its last commit or the server's branches change.
+const mergedKey = (repo) => { const st = state.status[repo] || {}; return `${st.branch}|${st.oid}|${st.upstream}|${state.lastFetch[repo] || 0}`; };
+async function loadMerged(repo) {
+  const st = state.status[repo];
+  if (!st || !st.branch || !st.upstream || st.op || isBase(st.branch) || state.config.settings.warnBranches === false) return;
+  const key = mergedKey(repo);
+  const had = state.merged[norm(repo)];
+  if (had?.key === key) return;
+  // Until the new answer is in, the last one stands if it was for the same branch (so the banner doesn't flicker after a fetch).
+  const before = had?.branch === st.branch ? had.into : null;
+  state.merged[norm(repo)] = { key, branch: st.branch, into: before };
+  const into = await gitRaw('branchMerged', repo, baseBranchNames(basePatterns())).catch(() => null);
+  if (state.merged[norm(repo)]?.key !== key) return;
+  state.merged[norm(repo)].into = into;
+  if (into !== before) onStatusChanged([repo]);
+}
 
 // What a repo is busy with right now (hidden while a preview is open, since nothing has started).
 const busyLabel = (repo) => {
@@ -444,6 +544,8 @@ async function refreshAll(force = false) {
 }
 
 function onStatusChanged(changedRepos) {
+  // Only matters once there are changes to warn about (see workWarning).
+  for (const r of changedRepos) if (changedFiles(state.status[r]).length) loadMerged(r);
   renderSidebar();
   renderTabbar();
   const v = state.view;

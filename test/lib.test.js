@@ -132,3 +132,52 @@ test('repos move or copy between workspaces', () => {
   assert.equal(lib.moveRepo(w, api, 'a', 'a'), false, 'same workspace');
   assert.equal(lib.moveRepo(w, api, 'a', 'nope'), false, 'unknown workspace');
 });
+
+test('base branches: names and wildcards from the setting', () => {
+  assert.ok(lib.isBaseBranch('dev'));
+  assert.ok(lib.isBaseBranch('Main'));
+  assert.ok(!lib.isBaseBranch('feature/dev-tools'));
+  assert.ok(lib.isBaseBranch('release/2.1', 'main release/*'));
+  assert.ok(!lib.isBaseBranch('dev', 'main release/*'));
+  assert.ok(!lib.isBaseBranch('a.b', 'a*c'), 'only * is special');
+  assert.deepEqual(lib.baseBranchNames('main  release/* dev'), ['main', 'dev']);
+});
+
+test('branch warnings: work on main/dev, or on a finished branch', () => {
+  const st = (o) => ({ branch: 'dev', hasRemote: true, upstream: 'origin/dev', ahead: 0, ...o });
+  assert.equal(lib.branchWarning(st({})), null, 'nothing to move');
+  assert.deepEqual(lib.branchWarning(st({}), { changes: 2 }), { kind: 'base', changes: 2, unsent: 0 });
+  assert.deepEqual(lib.branchWarning(st({ ahead: 3 })), { kind: 'base', changes: 0, unsent: 3 }, 'unsent commits on dev');
+  assert.equal(lib.branchWarning(st({ hasRemote: false }), { changes: 2 }), null, 'a repo with no server has no pull requests');
+  assert.equal(lib.branchWarning(st({ op: { kind: 'merge' } }), { changes: 2 }), null, 'resolving a merge on dev is normal');
+  assert.equal(lib.branchWarning(st({}), { changes: 2, patterns: 'main' }), null, 'dev taken off the list');
+
+  const f = (o) => st({ branch: 'feature/x', upstream: 'origin/feature/x', ...o });
+  assert.equal(lib.branchWarning(f({}), { changes: 2 }), null, 'an ordinary feature branch');
+  assert.equal(lib.branchWarning(f({ upstreamGone: true })), null, 'finished but untouched');
+  assert.equal(lib.branchWarning(f({ upstreamGone: true }), { changes: 1 }).why, 'gone');
+  assert.equal(lib.branchWarning(f({}), { changes: 1, prDone: true }).why, 'pr');
+  assert.deepEqual(lib.branchWarning(f({}), { changes: 1, mergedInto: 'dev' }), { kind: 'finished', why: 'merged', into: 'dev', changes: 1 });
+});
+
+test('branch name advice: prefixes, shared names, names already taken', () => {
+  const issues = (n, o) => lib.branchNameIssues(n, o).map((i) => i.kind);
+  assert.deepEqual(issues('feature/login'), []);
+  assert.deepEqual(issues('Fix/crash'), [], 'prefixes ignore case');
+  assert.deepEqual(issues(''), []);
+  assert.equal(lib.branchNameIssues('login-page')[0].suggest, 'feature/login-page');
+  assert.equal(lib.branchNameIssues('feat/login')[0].suggest, 'feature/login', 'a near miss is replaced, not doubled');
+  assert.equal(lib.branchNameIssues('features/login')[0].suggest, 'feature/login');
+  assert.deepEqual(issues('dev'), ['base'], 'a shared name, not also a prefix complaint');
+  assert.deepEqual(issues('feature/x', { local: ['feature/X'] }), ['exists']);
+  assert.ok(lib.branchNameIssues('feature/x', { local: ['feature/x'] })[0].severe);
+  assert.deepEqual(issues('feature/x', { remote: ['feature/x'] }), ['remote']);
+  assert.deepEqual(issues('anything', { prefixes: '' }), [], 'no prefixes set: any name');
+});
+
+test('Shelf items from branches that are gone', () => {
+  const s = (branch, message) => ({ branch, message, oid: branch + message });
+  const items = [s('feature/a', '[auto] feature/a: left behind'), s('dev', 'wip'), s('feature/b', '[discarded] x.txt'), s('(no branch)', 'x')];
+  assert.deepEqual(lib.orphanedShelf(items, ['dev', 'main']).map((x) => x.branch), ['feature/a'], 'discarded copies and detached ones are left alone');
+  assert.deepEqual(lib.orphanedShelf(items, ['dev', 'feature/a']), []);
+});

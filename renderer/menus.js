@@ -24,6 +24,11 @@ async function openSettings() {
       <label class="field"><span>Start every commit summary with (optional)</span><input name="commitTemplate" value="${esc(s.commitTemplate || '')}" placeholder="e.g. ABC-123: "></label>
       <label class="field"><span>Quick type buttons above the summary (space-separated; empty to hide)</span><input name="commitPrefixes" value="${esc(s.commitPrefixes ?? 'feat fix docs refactor test chore')}"></label>
       <label class="check"><input type="checkbox" name="workItems" ${s.workItems !== false ? 'checked' : ''}> Show a work item box (AB#) for Azure Boards, filled in from the branch name (e.g. feature/1234-login)</label>
+      <h3>Branches</h3>
+      <label class="field"><span>Shared branches you don't work on directly (space-separated, * matches anything)</span><input name="baseBranches" value="${esc(s.baseBranches ?? DEFAULT_BASE_BRANCHES)}" spellcheck="false"></label>
+      <label class="check"><input type="checkbox" name="warnBranches" ${s.warnBranches !== false ? 'checked' : ''}> Warn me when I change or commit on one of these, or on a branch that's already finished, and offer to move the work to a new branch</label>
+      <label class="field"><span>New branch names start with (space-separated; empty for any name)</span><input name="branchPrefixes" value="${esc(s.branchPrefixes ?? DEFAULT_BRANCH_PREFIXES)}" spellcheck="false"></label>
+      <label class="field"><span>Mention when a branch is this many commits behind the branch it started from (0 = never)</span><input name="behindWarn" type="number" min="0" max="1000" value="${esc(s.behindWarn ?? 20)}"></label>
       <h3>GitHub</h3>
       <p class="hint">With a personal access token, repos on GitHub show their pull request's reviews and checks next to the branch, and you can create pull requests and new repos from RepoDeck.
         Create a <a href="#" data-url="https://github.com/settings/tokens/new?scopes=repo,read:org&amp;description=RepoDeck">classic token</a> with the <b>repo</b> and <b>read:org</b> scopes
@@ -61,6 +66,12 @@ async function openSettings() {
   s.commitTemplate = v.commitTemplate;
   s.commitPrefixes = v.commitPrefixes.trim();
   s.workItems = v.workItems;
+  s.baseBranches = v.baseBranches.trim();
+  s.warnBranches = v.warnBranches;
+  s.branchPrefixes = v.branchPrefixes.trim();
+  s.behindWarn = Math.max(0, Number(v.behindWarn) || 0);
+  state.merged = {};
+  state.behind = {};
   let tokensChanged = false;
   for (const [kind, name] of [['github', 'GitHub'], ['ado', 'Azure DevOps']]) {
     if (!v[`${kind}Token`].trim() && !v[`${kind}Forget`]) continue;
@@ -86,6 +97,7 @@ async function openSettings() {
   applyAssistant();
   toast('Settings saved.', 'ok');
   rerender();
+  onStatusChanged(allRepos()); // the branch warnings may have changed
 }
 
 function openHelp() {
@@ -220,6 +232,7 @@ function paletteCommands() {
     a('Send / publish', 'push');
     a('Check for updates', 'fetch');
     a('New branch…', 'new-branch');
+    if (st.branch && (changedFiles(st).length || st.ahead)) a('Move my work to a new branch…', 'move-to-branch');
     if (st.branch) a(`Update ${st.branch} from another branch…`, 'update-from');
     if (st.branch) a(`Finish ${st.branch} (after its pull request)…`, 'finish-branch');
     a('Compare branches', 'compare');

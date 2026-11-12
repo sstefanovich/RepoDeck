@@ -150,6 +150,12 @@ a { color: var(--accent); }
 .badge.ahead { color: var(--accent); background: var(--accent-soft); }
 .badge.behind { color: var(--ok); background: var(--ok-soft); }
 .badge.bad { color: var(--bad); background: var(--bad-soft); }
+.name-advice:empty { display: none; }
+.name-advice { margin: -6px 0 12px; display: grid; gap: 4px; }
+.name-issue { font-size: 12.5px; color: var(--warn); display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.name-issue.bad { color: var(--bad); }
+.name-issues { margin: 0 0 4px; padding-left: 18px; }
+.badge.wrong { color: var(--warn); background: var(--warn-soft); border: 1px solid var(--warn); }
 .sidebar-foot { padding: 10px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 2px; }
 .foot-row { display: flex; gap: 2px; }
 .foot-row .btn { flex: 1; }
@@ -235,13 +241,13 @@ a { color: var(--accent); }
 .sync-text { color: var(--text); min-width: 0; flex: 0 1 auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .rh-bar > .btn, .rh-bar > .busy, .rh-bar > .branch-pill { flex-shrink: 0; }
 
-.banner { display: flex; align-items: center; gap: 16px; padding: 12px 22px; border-bottom: 1px solid var(--border); }
+.banner { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding: 12px 22px; border-bottom: 1px solid var(--border); }
 .banner.warn { background: var(--warn-soft); }
 .banner.info { background: var(--accent-soft); }
 .banner.bad { background: var(--bad-soft); margin-top: 10px; border-radius: 8px; }
-.banner > div:first-child { flex: 1; }
+.banner > div:first-child { flex: 1 1 320px; min-width: 0; }
 .banner-title { font-weight: 700; margin-bottom: 2px; }
-.banner-actions { display: flex; gap: 8px; }
+.banner-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 
 .tabs { display: flex; gap: 2px; padding: 0 16px; background: var(--panel); border-bottom: 1px solid var(--border); }
 .tab {
