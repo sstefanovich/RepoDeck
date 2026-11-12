@@ -35,6 +35,9 @@ function updateRepoChrome() {
   $('#repo-header').innerHTML = repoHeaderHtml(repo);
   $('#op-banner').innerHTML = bannerHtml(repo);
   $('#tabs').innerHTML = tabsHtml(repo);
+  // Background checks for the banners (cached; they redraw this when their answer changes).
+  loadBehind(repo);
+  loadShelfCheck(repo);
 }
 
 function updateRepoView() {
@@ -67,7 +70,7 @@ function repoHeaderHtml(repo) {
   const checked = state.lastFetch[repo] ? `checked ${timeAgo(state.lastFetch[repo] / 1000)}` : '';
   const sync = syncText(st);
   const noServer = !st.hasRemote && !st.detached;
-  const prable = st.upstream && !st.upstreamGone && !st.ahead && !['main', 'master', 'develop'].includes(st.branch);
+  const prable = st.upstream && !st.upstreamGone && !st.ahead && !isBase(st.branch);
   const pushBtn = noServer
     ? `<button class="btn ${st.initial ? '' : 'primary'}" data-action="add-remote" data-repo="${esc(repo)}" ${d} title="git remote add — connect this repo to a server such as GitHub">⇪ Add server…</button>`
     : `<button class="btn ${st.ahead || (!st.upstream && !st.initial && !st.detached) ? 'primary' : ''}" data-action="push" data-repo="${esc(repo)}" ${d} title="git push — uploads your commits to the server">↑ ${st.upstream || st.detached ? 'Send' : 'Publish branch'}${st.ahead ? ` (${st.ahead})` : ''}</button>`;
@@ -116,6 +119,8 @@ function bannerHtml(repo) {
       <div>You're looking at an old snapshot. Any commits you make here won't belong to a branch and are easy to lose.</div></div>
       <div class="banner-actions"><button class="btn" data-action="tab" data-tab="branches">Go back to a branch</button><button class="btn primary" data-action="new-branch" data-repo="${r}">Create a branch here</button></div></div>`;
   }
+  const w = workWarning(repo);
+  if (w) return workWarningBannerHtml(repo, st, w);
   const pr = state.prStatus[norm(repo)];
   const prDone = pr?.branch === st.branch && pr.status === 'completed';
   if (st.branch && (st.upstreamGone || prDone)) {
@@ -123,7 +128,47 @@ function bannerHtml(repo) {
       <div>${prDone ? 'Its work is in the main branch now.' : 'That usually means its pull request was completed.'} Finish up: switch to the main branch, get its latest, and delete ${esc(st.branch)} here.</div></div>
       <div class="banner-actions"><button class="btn primary" data-action="finish-branch" data-repo="${r}" title="git switch, git pull, git branch -D">✓ Finish branch…</button></div></div>`;
   }
+  const behind = behindWarning(repo);
+  if (behind) {
+    return `<div class="banner info"><div><div class="banner-title">${esc(st.branch)} is ${plural(behind.behind, 'commit')} behind ${esc(behind.name)}</div>
+      <div>The longer a branch goes without ${esc(behind.name)}'s changes, the harder its pull request is to merge. Bringing them in now keeps any clashes small.</div></div>
+      <div class="banner-actions"><button class="btn ghost" data-action="behind-ok" data-repo="${r}" title="Don't mention this again for ${esc(st.branch)} until RepoDeck restarts">Not now</button>
+        <button class="btn primary" data-action="update-from" data-repo="${r}" data-ref="${esc(behind.ref)}" title="git merge ${esc(behind.ref)} (or rebase)">⤓ Update from ${esc(behind.name)}…</button></div></div>`;
+  }
+  const orphans = shelfOrphans(repo);
+  if (orphans.length) {
+    const names = [...new Set(orphans.map((s) => s.branch))];
+    return `<div class="banner info"><div><div class="banner-title">${orphans.length === 1 ? 'A Shelf item was' : `${orphans.length} Shelf items were`} left on ${names.length === 1 ? `${esc(names[0])}, which no longer exists` : `branches that no longer exist (${names.map(esc).join(', ')})`}</div>
+      <div>${orphans.length === 1 ? 'It was' : 'They were'} set aside and never put back. Have a look: restore what you still need here, and delete the rest.</div></div>
+      <div class="banner-actions"><button class="btn ghost" data-action="shelf-ok" data-repo="${r}" title="Don't mention ${orphans.length === 1 ? 'it' : 'these'} again until RepoDeck restarts">Not now</button>
+        <button class="btn primary" data-action="tab" data-tab="shelf">Go to the Shelf</button></div></div>`;
+  }
   return '';
+}
+
+// Why this branch is the wrong place for new work, in a sentence.
+function finishedReason(repo, st, w) {
+  if (w.why === 'gone') return `${esc(st.branch)} was deleted on the server, which usually means its pull request was completed.`;
+  if (w.why === 'pr') return `Pull request #${esc(state.prStatus[norm(repo)]?.id)} for ${esc(st.branch)} is completed.`;
+  return `Everything on ${esc(st.branch)} is already in <b>${esc(w.into)}</b>.`;
+}
+
+function workWarningBannerHtml(repo, st, w) {
+  const r = esc(repo);
+  const b = esc(st.branch);
+  const keep = `<button class="btn ghost" data-action="warn-ok" data-repo="${r}" title="Don't warn me about ${b} again until RepoDeck restarts">Keep working here</button>`;
+  const move = (label) => `<button class="btn primary" data-action="move-to-branch" data-repo="${r}">⎇ ${label}</button>`;
+  if (w.kind === 'finished') {
+    // Finish branch puts the changes on the Shelf first; Move carries them to a fresh branch.
+    const finish = w.why === 'merged' ? '' : `<button class="btn" data-action="finish-branch" data-repo="${r}" title="git switch, git pull, git branch -D">✓ Finish branch…</button>`;
+    return `<div class="banner warn"><div><div class="banner-title">${b} is finished, but you're changing it</div>
+      <div>${finishedReason(repo, st, w)} New work usually goes on a fresh branch from ${esc(w.into || 'the main branch')}. Did you mean to switch first?</div></div>
+      <div class="banner-actions">${keep}${finish}${move('Move my changes to a new branch…')}</div></div>`;
+  }
+  const what = [w.changes ? plural(w.changes, 'uncommitted change') : '', w.unsent ? `${plural(w.unsent, 'unsent commit')}` : ''].filter(Boolean).join(' and ');
+  return `<div class="banner warn"><div><div class="banner-title">You're working directly on ${b}</div>
+    <div>You have ${what} on ${b}. Work usually goes on its own branch and reaches ${b} through a pull request.</div></div>
+    <div class="banner-actions">${keep}${move(`Move ${w.unsent && !w.changes ? 'them' : 'my work'} to a new branch…`)}</div></div>`;
 }
 
 function tabsHtml(repo) {
@@ -558,6 +603,21 @@ async function doCommit(repo, thenPush) {
   let some = partial && Object.keys(partial).length ? partial : null;
   let all = !some && files.length > 0 && ticked.length === files.length;
   let commitPaths = paths;
+  // About to commit to main/dev, or to a branch that's already finished? Offer to move first.
+  // (Not while finishing a merge: resolving conflicts on dev is normal.)
+  const w = st.op ? null : workWarning(repo);
+  if (w) {
+    const b = esc(st.branch);
+    const c = await choose(w.kind === 'base' ? `Commit straight to ${st.branch}?` : `${st.branch} is already finished`,
+      `<p>${w.kind === 'base' ? `<b>${b}</b> is a shared branch. Work usually goes on its own branch and reaches ${b} through a pull request.` : `${finishedReason(repo, st, w)} This commit probably belongs on a new branch.`}</p>`, [
+        { id: 'move', label: 'Put it on a new branch', desc: `Moves your changes to a new branch (you pick the name), then makes this commit there. ${b} is left as it was.`, kind: 'primary' },
+        { id: 'here', label: `Commit to ${st.branch} anyway`, desc: `I won't ask again about ${b} in this repo until RepoDeck restarts.` },
+      ]);
+    if (c === 'move') { if (await moveToNewBranch(repo)) return doCommit(repo, thenPush); return; }
+    if (c !== 'here') return;
+    state.warnOk.add(warnKey(repo, st.branch));
+    updateRepoChrome();
+  }
   if (ticked.length) {
     const checked = await checkBeforeCommit(repo, { paths, all });
     if (!checked) { updateRepoView(); return; }
@@ -620,6 +680,20 @@ async function doPull(repo) {
 
 // quiet: no message on success (the caller carries on, e.g. to create a pull request).
 async function doPush(repo, { quiet = false } = {}) {
+  // Sending commits straight to main/dev (made here or in an editor) — check that's intended.
+  const st0 = state.status[repo] || {};
+  const w = workWarning(repo);
+  if (w?.kind === 'base' && w.unsent) {
+    const b = esc(st0.branch);
+    const c = await choose(`Send ${plural(w.unsent, 'commit')} straight to ${st0.branch}?`,
+      `<p><b>${b}</b> is a shared branch. Work usually reaches it through a pull request, and some servers refuse direct sends to it.</p>`, [
+        { id: 'move', label: 'Move them to a new branch', desc: `Puts the commits on a new branch (ready to send and open a pull request), and puts ${b} back to match the server.`, kind: 'primary' },
+        { id: 'send', label: `Send to ${st0.branch}`, desc: `I won't ask again about ${b} in this repo until RepoDeck restarts.` },
+      ]);
+    if (c === 'move') { await moveToNewBranch(repo); return false; }
+    if (c !== 'send') return false;
+    state.warnOk.add(warnKey(repo, st0.branch));
+  }
   try {
     const r = await busy(repo, 'Sending…', () => git('push', repo));
     if (r.rejected) {
@@ -636,7 +710,7 @@ async function doPush(repo, { quiet = false } = {}) {
     if (quiet) return true;
     const msg = r.published ? 'Branch published to the server.' : 'Sent to the server.';
     // The natural next step after sending a feature branch is a pull request.
-    if (r.branch && !['main', 'master', 'develop'].includes(r.branch)) {
+    if (r.branch && !isBase(r.branch)) {
       const url = await gitRaw('prUrl', repo, r.branch).catch(() => null);
       if (url) { toast(msg, 'ok', { label: 'Pull request…', fn: () => openPullRequest(repo) }); return true; }
     }

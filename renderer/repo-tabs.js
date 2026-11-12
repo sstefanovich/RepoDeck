@@ -261,9 +261,10 @@ function renderShelfTab() {
   const mine = list.filter((s) => !isDiscarded(s));
   const discarded = list.filter(isDiscarded);
   const old = discarded.filter((s) => Date.now() / 1000 - s.time > 14 * 86400);
+  const gone = new Set((state.shelfCheck[norm(repo)]?.orphans || []).map((s) => s.oid));
   const row = (s) => `<div class="commit ${s.ref === state.selStash ? 'selected' : ''}" data-action="select-stash" data-ref="${esc(s.ref)}">
-        <div class="commit-subject">${esc(s.message.replace(/^\[(auto|discarded)\] /, ''))} ${/^\[auto\]/.test(s.message) ? '<span class="tag">auto</span>' : ''}</div>
-        <div class="commit-meta">from ${esc(s.branch)} · ${timeAgo(s.time)}</div>
+        <div class="commit-subject">${esc(s.message.replace(/^\[(auto|discarded|moving)\] /, ''))} ${/^\[auto\]/.test(s.message) ? '<span class="tag">auto</span>' : ''}</div>
+        <div class="commit-meta">from ${esc(s.branch)}${gone.has(s.oid) ? ' <span class="tag bad" title="That branch no longer exists. Restore these changes here if you still need them.">branch deleted</span>' : ''} · ${timeAgo(s.time)}</div>
       </div>`;
   const discardOpen = state.discardOpen || mine.length === 0;
   body.innerHTML = `${intro}

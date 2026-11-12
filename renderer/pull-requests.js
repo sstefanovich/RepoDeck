@@ -31,7 +31,7 @@ async function createPrDialog(repo, info) {
   const remote = st.upstream.split('/')[0];
   const br = await gitRaw('branches', repo).catch(() => null);
   const targets = (br?.remote || []).filter((b) => b.remote === remote && b.branch !== st.branch).map((b) => b.branch);
-  const target0 = [info.defaultBranch, 'main', 'master', 'develop'].find((b) => b && targets.includes(b)) || targets[0];
+  const target0 = [info.defaultBranch, 'main', 'master', 'develop', 'dev'].find((b) => b && targets.includes(b)) || targets[0];
   if (!target0) { toast('There is no other branch on the server to merge into.', 'warn'); return; }
   const compareTo = (target) => gitRaw('compare', repo, `${remote}/${target}`, 'HEAD').catch(() => null);
   let cmp = await compareTo(target0);

@@ -568,3 +568,104 @@ test('previews describe what will run', async () => {
   assert.match((await ops.plan('resetTo', a, 'a'.repeat(40), 'soft'))[0].cmd, /reset --soft/);
   assert.equal((await ops.plan('nonsense')).length, 1);
 });
+
+test('moving work off dev, or off a finished branch, onto a new branch', async () => {
+  const srv = sb.server('move');
+  const a = sb.repo('move');
+  sb.write(a, 'f.txt', 'one\n');
+  await ops.commit(a, { message: 'base', paths: [], all: true });
+  await ops.addRemote(a, srv);
+  await ops.push(a);
+  sb.sh(a, 'switch', '-qc', 'dev');
+  await ops.push(a);
+  const sent = (await ops.status(a)).oid;
+
+  // Two commits and an edit made on dev by mistake: all of it goes to the new branch, dev goes back to the server's.
+  sb.write(a, 'f.txt', 'one\ntwo\n');
+  await ops.commit(a, { message: 'oops 1', paths: [], all: true });
+  sb.write(a, 'g.txt', 'g\n');
+  await ops.commit(a, { message: 'oops 2', paths: [], all: true });
+  sb.write(a, 'f.txt', 'one\ntwo\nthree\n');
+  const top = (await ops.status(a)).oid;
+  const res = await ops.moveToNewBranch(a, { name: 'feature/oops', moveCommits: true });
+  assert.equal(res.moved, 2);
+  let st = await ops.status(a);
+  assert.equal(st.branch, 'feature/oops');
+  assert.equal(st.oid, top);
+  assert.equal(st.unstaged.length, 1, 'the edit came along');
+  assert.equal(sb.sh(a, 'rev-parse', 'dev').trim(), sent, 'dev matches the server again');
+
+  // Undo puts dev and the edit back.
+  await ops.undoMoveToNewBranch(a, res);
+  st = await ops.status(a);
+  assert.equal(st.branch, 'dev');
+  assert.equal(st.oid, top);
+  assert.equal(st.unstaged.length, 1);
+  assert.equal(sb.sh(a, 'branch', '--list', 'feature/oops').trim(), '');
+  sb.sh(a, 'reset', '-q', '--hard', sent);
+
+  // A finished feature branch: published, merged into dev, then edited again.
+  sb.sh(a, 'switch', '-qc', 'feature/done');
+  assert.equal(await ops.branchMerged(a, ['dev', 'main']), null, 'not published yet');
+  await ops.push(a);
+  assert.equal(await ops.branchMerged(a, ['dev', 'main']), null, 'published, but no commits of its own yet');
+  sb.write(a, 'done.txt', 'done\n');
+  await ops.commit(a, { message: 'the feature', paths: [], all: true });
+  await ops.push(a);
+  assert.equal(await ops.branchMerged(a, ['dev', 'main']), null, 'not merged yet');
+  sb.sh(a, 'switch', '-q', 'dev');
+  sb.sh(a, 'merge', '-q', '--no-ff', '-m', 'Merge feature/done', 'feature/done');
+  sb.sh(a, 'push', '-q');
+  sb.write(a, 'f.txt', 'one\nnew work\n');
+  await ops.commit(a, { message: 'more on dev', paths: [], all: true }); // dev moves on (unsent, so origin/dev doesn't)
+  sb.sh(a, 'switch', '-q', 'feature/done');
+  assert.equal(await ops.branchMerged(a, ['dev', 'main']), 'dev');
+
+  // New work started there by mistake moves onto a fresh branch from the server's dev.
+  sb.write(a, 'later.txt', 'next feature\n');
+  const res2 = await ops.moveToNewBranch(a, { name: 'feature/next', start: 'origin/dev' });
+  st = await ops.status(a);
+  assert.equal(st.branch, 'feature/next');
+  assert.equal(st.oid, sb.sh(a, 'rev-parse', 'origin/dev').trim());
+  assert.deepEqual(st.untracked.map((x) => x.path), ['later.txt']);
+  assert.equal((await ops.stashList(a)).length, 0, 'nothing left on the Shelf');
+  await ops.undoMoveToNewBranch(a, res2);
+  st = await ops.status(a);
+  assert.equal(st.branch, 'feature/done');
+  assert.deepEqual(st.untracked.map((x) => x.path), ['later.txt']);
+
+  // Tidy up never offers to delete dev, even once it's merged into main.
+  sb.sh(a, 'switch', '-q', 'main');
+  sb.sh(a, 'merge', '-q', 'dev');
+  const t = await ops.tidyCandidates(a);
+  assert.ok(!t.branches.some((x) => x.name === 'dev'));
+});
+
+test('how far a branch is behind the branch it started from', async () => {
+  const srv = sb.server('behind');
+  const a = sb.repo('behind');
+  sb.write(a, 'f.txt', 'one\n');
+  await ops.commit(a, { message: 'base', paths: [], all: true });
+  await ops.addRemote(a, srv);
+  await ops.push(a);
+  sb.sh(a, 'switch', '-qc', 'dev');
+  sb.write(a, 'd.txt', 'dev work\n');
+  await ops.commit(a, { message: 'on dev', paths: [], all: true });
+  await ops.push(a);
+  sb.sh(a, 'switch', '-qc', 'feature/x');
+  assert.deepEqual(await ops.branchBehind(a, ['main', 'dev']), { ref: 'origin/dev', name: 'dev', behind: 0 }, 'started from dev, not main');
+
+  // dev moves on (on the server), and main gets one hotfix.
+  sb.sh(a, 'switch', '-q', 'dev');
+  for (let i = 0; i < 3; i++) { sb.write(a, 'd.txt', `dev ${i}\n`); await ops.commit(a, { message: `dev ${i}`, paths: [], all: true }); }
+  await ops.push(a);
+  sb.sh(a, 'switch', '-q', 'main');
+  sb.write(a, 'm.txt', 'hotfix\n');
+  await ops.commit(a, { message: 'hotfix', paths: [], all: true });
+  await ops.push(a);
+  sb.sh(a, 'switch', '-q', 'feature/x');
+  assert.deepEqual(await ops.branchBehind(a, ['main', 'dev']), { ref: 'origin/dev', name: 'dev', behind: 3 });
+  assert.deepEqual(await ops.branchBehind(a, ['main', 'dev'], 'origin/main'), { ref: 'origin/main', name: 'main', behind: 1 }, 'the branch last used for Update from wins');
+  sb.sh(a, 'switch', '-q', 'dev');
+  assert.equal(await ops.branchBehind(a, ['main', 'dev']), null, 'not for the shared branches themselves');
+});

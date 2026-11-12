@@ -4,11 +4,13 @@
 // One of several plain scripts sharing the page's global scope; index.html loads them in order.
 
 // ---------- sidebar ----------
-function badgesHtml(st) {
+function badgesHtml(st, repo = null) {
   if (!st) return '';
   if (st.missing) return '<span class="badge bad" title="Folder not found">missing</span>';
   if (st.error) return '<span class="badge bad" title="Not a git repo">error</span>';
   const out = [];
+  const w = repo && workWarning(repo);
+  if (w) out.push(`<span class="badge wrong" title="${esc(w.kind === 'base' ? `Work on ${st.branch} itself. It usually goes on its own branch.` : `${st.branch} is already finished. These changes probably belong on a new branch.`)}">⚠</span>`);
   if (st.conflicted?.length || st.op) out.push(`<span class="badge bad" title="Conflicts need your attention">⚠ ${st.conflicted.length || '!'}</span>`);
   const n = changedFiles(st).length;
   if (n) out.push(`<span class="badge changes" title="${plural(n, 'uncommitted change')}">● ${n}</span>`);
@@ -35,7 +37,7 @@ function renderSidebar() {
         const branch = st?.detached ? 'detached' : st?.branch || '';
         return `<div class="repo-item ${activeRepo ? 'active' : ''}" draggable="${ws.length > 1}" data-action="open-repo" data-repo="${esc(p)}" data-ws="${w.id}" title="${esc(p)}${ws.length > 1 ? '\nDrag onto another workspace to move it there (hold Ctrl to copy)' : ''}">
           <div class="ri-top"><span class="ri-name">${esc(basename(p))}</span>${busyLabel(p) ? `<span class="spinner sm" role="status" aria-label="${esc(busyLabel(p))}"></span>` : ''}</div>
-          <div class="ri-bottom"><button class="ri-branch" data-action="branch-switcher" data-repo="${esc(p)}" title="Switch branch" ${st && !st.error && !st.missing ? '' : 'disabled'}>⎇ ${esc(branch)}</button><span class="ri-badges">${badgesHtml(st)}</span></div>
+          <div class="ri-bottom"><button class="ri-branch" data-action="branch-switcher" data-repo="${esc(p)}" title="Switch branch" ${st && !st.error && !st.missing ? '' : 'disabled'}>⎇ ${esc(branch)}</button><span class="ri-badges">${badgesHtml(st, p)}</span></div>
         </div>`;
       }).join('') || '<div class="muted small pad">No repos yet — click ＋</div>'}</div>`}
     </div>`;

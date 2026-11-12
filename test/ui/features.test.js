@@ -178,6 +178,10 @@ test('pull request status chip (with sample data, no real Azure DevOps)', async 
     updateRepoChrome();
     return document.querySelector('#op-banner').innerText;`);
   assert.match(completed, /Pull request #42 .* is completed/);
+  assert.ok(await app.run("return !!document.querySelector('#op-banner [data-action=finish-branch]') && !!document.querySelector('#op-banner [data-action=move-to-branch]')"),
+    'with changes on it, the completed branch offers both Finish and Move');
+  await assertLayout('finished-branch warning at 960px');
+  await shot('finished-branch-warning');
   await app.run(`delete state.prStatus[norm(${JSON.stringify(repo)})]; updateRepoChrome();`);
 });
 

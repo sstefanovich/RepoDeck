@@ -84,6 +84,38 @@ function renderBranchesTab() {
 
 const branchTransform = (v) => v.replace(/\s+/g, '-');
 
+// ---------- branch names ----------
+const branchPrefixes = () => state.config.settings.branchPrefixes ?? DEFAULT_BRANCH_PREFIXES;
+// Names already in use, from a branches listing: { local, remote } (remote without "origin/").
+const takenNames = (b) => ({ local: (b?.local || []).map((x) => x.name), remote: (b?.remote || []).map((x) => x.branch) });
+const nameIssues = (name, taken) => branchNameIssues(name, { prefixes: branchPrefixes(), patterns: basePatterns(), ...taken });
+
+// Advice under a branch name box as you type, with a button to take the suggested name.
+function wireBranchName(input, out, taken) {
+  const show = () => {
+    out.innerHTML = nameIssues(input.value, taken).map((i) => `<div class="name-issue ${i.severe ? 'bad' : ''}">${esc(i.msg)}${i.suggest
+      ? ` <button type="button" class="btn small ghost" data-suggest="${esc(i.suggest)}">Use ${esc(i.suggest)}</button>` : ''}</div>`).join('');
+  };
+  input.addEventListener('input', () => { const p = input.selectionStart; const v = branchTransform(input.value); if (v !== input.value) { input.value = v; input.setSelectionRange(p, p); } show(); });
+  out.addEventListener('click', (e) => { const b = e.target.closest('[data-suggest]'); if (b) { input.value = b.dataset.suggest; show(); input.focus(); } });
+  show();
+}
+
+// A last look at the name before using it. Resolves the name to use (maybe the suggested one), or null to stop.
+async function confirmBranchName(name, taken) {
+  if (!(await git('checkBranchName', name))) { showError('Invalid branch name', new Error(`fatal: '${name}' is not a valid branch name`)); return null; }
+  const issues = nameIssues(name, taken);
+  const severe = issues.find((i) => i.severe);
+  if (severe) { toast(severe.msg, 'warn'); return null; }
+  if (!issues.length) return name;
+  const suggest = issues.find((i) => i.suggest)?.suggest;
+  const c = await choose(`Call the branch ${name}?`, `<ul class="name-issues">${issues.map((i) => `<li>${esc(i.msg)}</li>`).join('')}</ul>`, [
+    ...(suggest ? [{ id: 'suggest', label: `Use ${suggest}`, kind: 'primary' }] : []),
+    { id: 'anyway', label: `Use ${name} anyway`, desc: 'Prefer other names? Change the list in Settings → Branches.' },
+  ]);
+  return c === 'suggest' ? suggest : c === 'anyway' ? name : null;
+}
+
 async function newBranch(repo) {
   const st = state.status[repo] || {};
   let b = state.branches;
@@ -93,22 +125,103 @@ async function newBranch(repo) {
   for (const x of b.local) if (!x.current) starts.push({ v: x.name, label: x.name });
   for (const x of b.remote) starts.push({ v: x.name, label: `${x.name} (latest from the server)` });
   const changes = changedFiles(st).length;
+  // Don't quietly build on something stale: a finished branch, or a main/dev that's behind the server.
+  const has = (v) => starts.some((s) => s.v === v);
+  let pick = '';
+  let why = '';
+  const w = workWarning(repo, { ignoreDismissed: true });
+  const done = !st.detached && st.branch && !isBase(st.branch) && (st.upstreamGone || w?.kind === 'finished');
+  if (done) {
+    const def = await gitRaw('defaultBranch', repo).catch(() => null);
+    const into = w?.into || def;
+    pick = [into && `origin/${into}`, into].find((v) => v && has(v)) || '';
+    if (pick) why = `${st.branch} is already finished, so this starts from <b>${esc(pick)}</b> instead.`;
+  } else if (isBase(st.branch) && st.behind && st.upstream && has(st.upstream)) {
+    pick = st.upstream;
+    why = `Your ${esc(st.branch)} is ${plural(st.behind, 'commit')} behind the server, so this starts from the server's latest (<b>${esc(pick)}</b>).`;
+  }
   const r = await modal({
     title: 'Create a new branch',
     body: `<label class="field"><span>Branch name</span><input name="name" placeholder="e.g. feature/login-page or fix/crash-on-save" spellcheck="false"></label>
-      ${starts.length > 1 ? `<label class="field"><span>Start from</span><select name="start">${starts.map((s) => `<option value="${esc(s.v)}">${esc(s.label)}</option>`).join('')}</select></label>` : ''}
+      <div class="name-advice" id="name-advice"></div>
+      ${starts.length > 1 ? `<label class="field"><span>Start from</span><select name="start">${starts.map((s) => `<option value="${esc(s.v)}" ${s.v === pick ? 'selected' : ''}>${esc(s.label)}</option>`).join('')}</select></label>` : ''}
+      ${why ? `<p class="hint">${why}</p>` : ''}
       <p class="hint">The new branch starts as a copy of what you pick above, and you'll be switched onto it.${changes ? ` Your ${plural(changes, 'uncommitted change')} will come with you.` : ''}</p>`,
     buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'ok', label: 'Create & switch', kind: 'primary' }],
-    init: (el) => { const i = el.querySelector('[name=name]'); i.addEventListener('input', () => { i.value = branchTransform(i.value); }); },
+    init: (el) => wireBranchName(el.querySelector('[name=name]'), el.querySelector('#name-advice'), takenNames(b)),
   });
   if (r.id !== 'ok' || !r.values.name) return;
-  const name = r.values.name.trim();
-  if (!(await git('checkBranchName', name))) { showError('Invalid branch name', new Error(`fatal: '${name}' is not a valid branch name`)); return; }
+  const name = await confirmBranchName(r.values.name.trim(), takenNames(b));
+  if (!name) return;
   try {
     await busy(repo, 'Creating branch…', () => git('createBranch', repo, name, r.values.start || null));
     toast(`Created ${name} and switched to it.`, 'ok');
     if (samePath(repo, currentRepo()) && state.tab === 'branches') loadBranches();
   } catch (e) { showError("Couldn't create the branch", e); }
+}
+
+// Moves work started in the wrong place (main, dev, or a branch that's already finished) onto a new branch.
+// Resolves true once the work is on the new branch (and false if cancelled, or it stopped on a conflict).
+async function moveToNewBranch(repo) {
+  const st = state.status[repo] || {};
+  if (st.op) { toast('Finish or abort what is in progress first (see the yellow banner).', 'warn'); return false; }
+  if (!st.branch) { toast("You're not on a branch.", 'warn'); return false; }
+  const w = workWarning(repo, { ignoreDismissed: true });
+  const finished = w?.kind === 'finished' || (!isBase(st.branch) && st.upstreamGone);
+  const [b, def] = await Promise.all([gitRaw('branches', repo).catch(() => ({ local: [], remote: [] })), gitRaw('defaultBranch', repo).catch(() => null)]);
+  const bases = [...new Set([...baseBranchNames(basePatterns()), def].filter(Boolean))];
+  const starts = [{ v: '', label: `${st.branch}, as it is now` }];
+  for (const x of b.remote) if (bases.includes(x.branch)) starts.push({ v: x.name, label: `${x.name} (latest from the server)` });
+  for (const x of b.local) if (!x.current && bases.includes(x.name)) starts.push({ v: x.name, label: x.name });
+  // A finished branch's work is in its base already, so new work starts from that base's latest.
+  const want = finished ? [w?.into && `origin/${w.into}`, w?.into, def && `origin/${def}`, def] : [];
+  const pick = want.find((v) => v && starts.some((s) => s.v === v)) || '';
+  const changes = changedFiles(st).length;
+  const unsent = !finished && st.upstream && !st.upstreamGone ? st.ahead || 0 : 0;
+  const r = await modal({
+    title: 'Move your work to a new branch',
+    body: `<label class="field"><span>New branch name</span><input name="name" placeholder="e.g. feature/login-page or fix/crash-on-save" spellcheck="false"></label>
+      <div class="name-advice" id="name-advice"></div>
+      <label class="field"><span>Start the new branch from</span><select name="start">${starts.map((s) => `<option value="${esc(s.v)}" ${s.v === pick ? 'selected' : ''}>${esc(s.label)}</option>`).join('')}</select></label>
+      ${unsent ? `<label class="check" id="mv-commits"><input type="checkbox" name="commits" checked> <span>Also take my ${plural(unsent, 'unsent commit')} off ${esc(st.branch)}, and put ${esc(st.branch)} back to match the server</span></label>` : ''}
+      <p class="hint" id="mv-hint"></p>`,
+    buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'ok', label: 'Move & switch', kind: 'primary' }],
+    init: (el) => {
+      wireBranchName(el.querySelector('[name=name]'), el.querySelector('#name-advice'), takenNames(b));
+      const sel = el.querySelector('[name=start]');
+      const box = el.querySelector('[name=commits]');
+      const hint = el.querySelector('#mv-hint');
+      const show = () => {
+        const here = !sel.value;
+        if (box) { box.disabled = !here; el.querySelector('#mv-commits').classList.toggle('muted', !here); }
+        const parts = [];
+        if (changes) parts.push(`Your ${plural(changes, 'uncommitted change')} come${changes === 1 ? 's' : ''} along${here ? '' : ` (if they clash with ${esc(sel.value)}, you'll pick what to keep)`}.`);
+        if (unsent && !here) parts.push(`Your unsent commits stay on ${esc(st.branch)}.`);
+        parts.push(`${esc(st.branch)} itself is ${box?.checked && here ? 'only moved back to the server\'s version' : 'not changed'}. Undo puts everything back.`);
+        hint.innerHTML = parts.join(' ');
+      };
+      sel.addEventListener('change', show);
+      box?.addEventListener('change', show);
+      show();
+    },
+  });
+  if (r.id !== 'ok' || !r.values.name) return false;
+  const name = await confirmBranchName(r.values.name.trim(), takenNames(b));
+  if (!name) return false;
+  const start = r.values.start || null;
+  try {
+    const res = await busy(repo, `Moving to ${name}…`, () => git('moveToNewBranch', repo, { name, start, moveCommits: !start && !!r.values.commits }));
+    if (samePath(repo, currentRepo()) && state.tab === 'branches') loadBranches();
+    if (res.conflicts) { await afterMaybeConflict(repo, res, null); return false; }
+    const after = await gitRaw('headOid', repo).catch(() => null);
+    const msg = res.moved ? `Moved your work to ${name}. ${st.branch} matches the server again.` : `Moved your changes to ${name}.`;
+    undoToast(msg, repo, `move to ${name}`, () => git('undoMoveToNewBranch', repo, res), async () => {
+      if (state.status[repo]?.branch !== name) return `${basename(repo)} is no longer on ${name}, so undoing now would change the wrong branch.`;
+      if ((await gitRaw('headOid', repo).catch(() => null)) !== after) return `${name} has new commits since. Undoing now would lose them.`;
+      return null;
+    });
+    return true;
+  } catch (e) { showError("Couldn't move to a new branch", e); return false; }
 }
 
 // Switch branch, dealing with uncommitted changes in a friendly way.
@@ -179,7 +292,8 @@ async function mergeBranch(repo, name) {
 }
 
 // Bring the latest from another branch (main, dev, a teammate's branch…) into the current one.
-async function updateFrom(repo) {
+// prefer: the branch to offer first (e.g. from the "behind dev" banner).
+async function updateFrom(repo, prefer = null) {
   const st = state.status[repo] || {};
   if (st.op) { toast('Finish or abort what is in progress first (see the yellow banner).', 'warn'); return; }
   if (!st.branch) { toast("You're not on a branch. Switch to one first.", 'warn'); return; }
@@ -192,7 +306,7 @@ async function updateFrom(repo) {
   const remembered = state.config.updateFrom?.[memoKey];
   const def = await gitRaw('defaultBranch', repo).catch(() => null);
   const all = [...local, ...remote];
-  const pick = [remembered, def && `origin/${def}`, def].find((x) => x && x !== st.branch && all.includes(x)) || all[0];
+  const pick = [prefer, remembered, def && `origin/${def}`, def].find((x) => x && x !== st.branch && all.includes(x)) || all[0];
   const opt = (n) => `<option value="${esc(n)}" ${n === pick ? 'selected' : ''}>${esc(n)}</option>`;
   const r = await modal({
     title: `Update ${st.branch} from another branch`,
@@ -254,6 +368,7 @@ async function finishBranch(repo) {
   if (!target || target === st.branch) { toast(`${st.branch} is the main branch, so there's nothing to finish.`, 'info'); return; }
   const dirty = changedFiles(st).length;
   const onServer = st.upstream && !st.upstreamGone;
+  const shelved = await shelfItemsOn(repo, st.branch);
   const r = await modal({
     title: `Finish ${st.branch}?`,
     body: `<ol class="steps">
@@ -261,7 +376,8 @@ async function finishBranch(repo) {
         <li>Delete <b>${esc(st.branch)}</b> on your computer. (Undo can bring it back.)</li>
       </ol>
       ${onServer ? `<label class="check"><input type="checkbox" name="remote"> Also delete it on the server (${esc(st.upstream)})</label>` : ''}
-      ${dirty ? `<p class="hint">You have ${plural(dirty, 'uncommitted change')} on this branch. They'll be put on the Shelf first, so nothing is lost.</p>` : ''}`,
+      ${dirty ? `<p class="hint">You have ${plural(dirty, 'uncommitted change')} on this branch. They'll be put on the Shelf first, so nothing is lost.</p>` : ''}
+      ${shelfItemsHint(st.branch, shelved)}`,
     buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'ok', label: '✓ Finish branch', kind: 'primary' }],
   });
   if (r.id !== 'ok') return;
@@ -280,8 +396,17 @@ async function finishBranch(repo) {
       await git('switchBranch', repo, res.branch);
     });
     if (samePath(repo, currentRepo()) && state.tab === 'branches') loadBranches();
+    recheckShelf(repo);
   } catch (e) { showError(`Couldn't finish ${st.branch}`, e); }
 }
+
+// Shelf items set aside on `branch` (not the safety copies from Discard), which deleting it would leave behind.
+async function shelfItemsOn(repo, branch) {
+  const list = await gitRaw('stashList', repo).catch(() => []);
+  return list.filter((s) => s.branch === branch && !/^\[discarded\]/.test(s.message));
+}
+const shelfItemsHint = (branch, items) => (items.length
+  ? `<p class="hint">⚠ ${items.length === 1 ? 'There is 1 item' : `There are ${items.length} items`} on the Shelf from <b>${esc(branch)}</b> (${esc(items[0].message.replace(/^\[\w+\] /, '').slice(0, 60))}${items.length > 1 ? '…' : ''}). ${items.length === 1 ? 'It stays' : 'They stay'} on the Shelf, so you can still restore ${items.length === 1 ? 'it' : 'them'} on another branch.</p>` : '');
 
 // Workspace: finish every repo whose branch was deleted on the server.
 async function wsFinish() {
@@ -332,15 +457,20 @@ async function branchMenu(repo, name) {
   else if (c === 'rename') {
     const nn = await ask(`Rename ${name}`, { label: 'New name', value: name, transform: branchTransform, okLabel: 'Rename', help: b.upstream ? "Note: this only renames it on your computer. The server still has the old name." : '' });
     if (!nn || nn === name) return;
-    try { await git('renameBranch', repo, name, nn); toast('Renamed.', 'ok'); loadBranches(); refreshAll(); }
+    const taken = takenNames(state.branches);
+    const newName = await confirmBranchName(nn, { ...taken, local: taken.local.filter((x) => x !== name) });
+    if (!newName) return;
+    try { await git('renameBranch', repo, name, newName); toast('Renamed.', 'ok'); loadBranches(); refreshAll(); }
     catch (e) { showError("Couldn't rename", e); }
   } else if (c === 'delete') {
     const slash = b.upstream ? b.upstream.indexOf('/') : -1;
     const remote = slash > 0 && b.track !== 'gone' ? { remote: b.upstream.slice(0, slash), branch: b.upstream.slice(slash + 1) } : null;
+    const shelved = await shelfItemsOn(repo, name);
     const r = await modal({
       title: `Delete ${name}?`,
       body: `<p>This removes the branch <b>${esc(name)}</b> from your computer.</p>
-        ${remote ? `<label class="check"><input type="checkbox" name="remote"> Also delete it on the server (${esc(b.upstream)})</label>` : ''}`,
+        ${remote ? `<label class="check"><input type="checkbox" name="remote"> Also delete it on the server (${esc(b.upstream)})</label>` : ''}
+        ${shelfItemsHint(name, shelved)}`,
       buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'ok', label: 'Delete', kind: 'danger' }],
     });
     if (r.id !== 'ok') return;
@@ -357,5 +487,6 @@ async function branchMenu(repo, name) {
       } else showError("Couldn't delete", e);
     }
     loadBranches();
+    recheckShelf(repo);
   }
 }
