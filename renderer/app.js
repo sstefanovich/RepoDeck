@@ -30,6 +30,7 @@ const actions = {
   'claude-open': () => toggleClaude(true),
   'claude-send': () => claudeSend(),
   'claude-stop': () => api.claude.interrupt(),
+  'claude-login': () => claudeLogin(),
   'claude-new': () => claudeNewChat(),
   'claude-idea': (t) => claudeSend(t.textContent),
   'claude-allow': (t) => { const it = cl.items[t.dataset.idx]; it.perm.decided = 'allowed'; api.claude.permission(it.perm.requestId, true, it.input); renderClaude(); },
@@ -81,7 +82,7 @@ const actions = {
       $('#commit-body').value = rest.join('\n').trim();
       state.commitMsg[repo] = { summary: $('#commit-summary').value, body: $('#commit-body').value };
       updateCommitButtons();
-    } catch (e) { showError("Claude couldn't write a message", e); }
+    } catch (e) { showClaudeError("Claude couldn't write a message", e); }
     finally { t.disabled = false; t.textContent = label; }
   },
   'commit-prefix': (t) => {

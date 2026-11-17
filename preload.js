@@ -47,6 +47,7 @@ contextBridge.exposeInMainWorld('api', {
     interrupt: () => ipcRenderer.invoke('claude:interrupt'),
     reset: () => ipcRenderer.invoke('claude:reset'),
     oneShot: (cwd, prompt) => ipcRenderer.invoke('claude:oneShot', cwd, prompt),
+    login: () => ipcRenderer.invoke('claude:login'),
     onEvent: on('claude:event'),
   },
 });

@@ -77,10 +77,11 @@ async function openMergeEditor(cmd, repo, file, oursLabel, theirsLabel) {
   return r;
 }
 
-async function openTerminal(dir) {
-  const wt = await launch(`wt -d "${dir}"`);
+// command (optional): a program to start in the terminal, already quoted.
+async function openTerminal(dir, command = '') {
+  const wt = await launch(`wt -d "${dir}"${command ? ` ${command}` : ''}`);
   if (wt.ok) return wt;
-  return launch(`start "" cmd /k cd /d "${dir}"`);
+  return launch(command ? `start "" /d "${dir}" cmd /k ${command}` : `start "" cmd /k cd /d "${dir}"`);
 }
 
 // ---------- window ----------
@@ -259,6 +260,12 @@ ipcMain.handle('claude:send', async (_e, text, opts) => {
 ipcMain.handle('claude:permission', (_e, requestId, allow, input) => { claude?.answerPermission(requestId, allow, input); return true; });
 ipcMain.handle('claude:interrupt', () => { claude?.interrupt(); return true; });
 ipcMain.handle('claude:reset', () => { claude?.stop(); claude = null; claudeKey = null; return true; });
+// Opens Claude Code in a terminal, so the user can sign in again (/login).
+ipcMain.handle('claude:login', async () => {
+  const exe = await findClaude(loadConfig().settings.claudePath);
+  if (!exe) return { ok: false, error: 'NOT_FOUND' };
+  return openTerminal(require('os').homedir(), `"${exe}"`);
+});
 ipcMain.handle('claude:oneShot', async (_e, cwd, prompt) => {
   const exe = await findClaude(loadConfig().settings.claudePath);
   if (!exe) return { ok: false, error: 'NOT_FOUND' };

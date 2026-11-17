@@ -76,7 +76,7 @@ function repoHeaderHtml(repo) {
     : `<button class="btn ${st.ahead || (!st.upstream && !st.initial && !st.detached) ? 'primary' : ''}" data-action="push" data-repo="${esc(repo)}" ${d} title="git push — uploads your commits to the server">↑ ${st.upstream || st.detached ? 'Send' : 'Publish branch'}${st.ahead ? ` (${st.ahead})` : ''}</button>`;
   return `${top}
     <div class="rh-bar">
-      <button class="branch-pill" data-action="branch-switcher" data-repo="${esc(repo)}" title="Switch to another branch, or create one" aria-haspopup="dialog">⎇ <b>${esc(branchLabel)}</b> <span class="pill-action">Switch branch ▾</span></button>
+      <button class="branch-pill" data-action="branch-switcher" data-repo="${esc(repo)}" title="Switch to another branch, or create one" aria-haspopup="dialog"><span class="i i-branch" aria-hidden="true"></span> <b>${esc(branchLabel)}</b> <span class="pill-action">Switch branch ▾</span></button>
       <div class="sync-text" title="${esc(sync.replace(/<[^>]+>/g, ''))}">${sync}${checked ? ` <span class="muted small">(${checked})</span>` : ''}</div>
       ${prChipHtml(repo)}
       <div class="spacer"></div>
@@ -157,7 +157,7 @@ function workWarningBannerHtml(repo, st, w) {
   const r = esc(repo);
   const b = esc(st.branch);
   const keep = `<button class="btn ghost" data-action="warn-ok" data-repo="${r}" title="Don't warn me about ${b} again until RepoDeck restarts">Keep working here</button>`;
-  const move = (label) => `<button class="btn primary" data-action="move-to-branch" data-repo="${r}">⎇ ${label}</button>`;
+  const move = (label) => `<button class="btn primary" data-action="move-to-branch" data-repo="${r}"><span class="i i-branch" aria-hidden="true"></span>${label}</button>`;
   if (w.kind === 'finished') {
     // Finish branch puts the changes on the Shelf first; Move carries them to a fresh branch.
     const finish = w.why === 'merged' ? '' : `<button class="btn" data-action="finish-branch" data-repo="${r}" title="git switch, git pull, git branch -D">✓ Finish branch…</button>`;

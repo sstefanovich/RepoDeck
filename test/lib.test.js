@@ -181,3 +181,13 @@ test('Shelf items from branches that are gone', () => {
   assert.deepEqual(lib.orphanedShelf(items, ['dev', 'main']).map((x) => x.branch), ['feature/a'], 'discarded copies and detached ones are left alone');
   assert.deepEqual(lib.orphanedShelf(items, ['dev', 'feature/a']), []);
 });
+
+test("Claude Code's login errors are told apart from other errors", () => {
+  for (const t of ['OAuth token has expired. Please obtain a new token or refresh your existing token.', 'Invalid API key · Please run /login',
+    'Failed to authenticate. API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}', 'Not logged in · Please run /login']) {
+    assert.ok(lib.isClaudeAuthError(t), t);
+  }
+  for (const t of ['Claude took too long to answer.', 'API Error: 529 Overloaded', "GitHub didn't accept your token. Check it in Settings: it may have expired or been revoked.", '']) {
+    assert.ok(!lib.isClaudeAuthError(t), t);
+  }
+});
