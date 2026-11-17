@@ -27,7 +27,7 @@ function renderBranchesTab() {
   const st = state.status[currentRepo()] || {};
   const cur = st.branch;
   const head = `<div class="toolbar wrap">
-      <button class="btn primary" data-action="new-branch" data-repo="${esc(currentRepo())}">⎇ New branch…</button>
+      <button class="btn primary" data-action="new-branch" data-repo="${esc(currentRepo())}"><span class="i i-branch" aria-hidden="true"></span>New branch…</button>
       ${cur ? `<button class="btn" data-action="update-from" data-repo="${esc(currentRepo())}" title="Bring in the new commits from main, dev or any other branch">⤓ Update ${esc(cur)} from…</button>` : ''}
       <input class="filter" id="branch-filter" placeholder="Filter branches…" spellcheck="false" aria-label="Filter branches">
       <button class="btn ghost" data-action="tidy" data-repo="${esc(currentRepo())}" title="Delete branches that were merged or deleted on the server">🧹 Tidy up…</button>

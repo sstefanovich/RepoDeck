@@ -37,7 +37,7 @@ function renderSidebar() {
         const branch = st?.detached ? 'detached' : st?.branch || '';
         return `<div class="repo-item ${activeRepo ? 'active' : ''}" draggable="${ws.length > 1}" data-action="open-repo" data-repo="${esc(p)}" data-ws="${w.id}" title="${esc(p)}${ws.length > 1 ? '\nDrag onto another workspace to move it there (hold Ctrl to copy)' : ''}">
           <div class="ri-top"><span class="ri-name">${esc(basename(p))}</span>${busyLabel(p) ? `<span class="spinner sm" role="status" aria-label="${esc(busyLabel(p))}"></span>` : ''}</div>
-          <div class="ri-bottom"><button class="ri-branch" data-action="branch-switcher" data-repo="${esc(p)}" title="Switch branch" ${st && !st.error && !st.missing ? '' : 'disabled'}>⎇ ${esc(branch)}</button><span class="ri-badges">${badgesHtml(st, p)}</span></div>
+          <div class="ri-bottom"><button class="ri-branch" data-action="branch-switcher" data-repo="${esc(p)}" title="Switch branch" ${st && !st.error && !st.missing ? '' : 'disabled'}><span class="i i-branch" aria-hidden="true"></span> ${esc(branch)}</button><span class="ri-badges">${badgesHtml(st, p)}</span></div>
         </div>`;
       }).join('') || '<div class="muted small pad">No repos yet — click ＋</div>'}</div>`}
     </div>`;
@@ -244,7 +244,7 @@ function renderTabbar() {
     if (t.type === 'workspace') {
       const w = state.config.workspaces.find((x) => x.id === t.ws);
       return `<div class="dtab ws ${active ? 'active' : ''}" draggable="true" role="tab" data-action="activate-tab" data-key="${esc(key)}" title="Workspace overview: ${esc(w?.name || '')}">
-        <span class="dtab-icon">▦</span><span class="dtab-name">${esc(w?.name || 'Workspace')}</span>${close}</div>`;
+        <span class="dtab-icon"><span class="i i-grid" aria-hidden="true"></span></span><span class="dtab-name">${esc(w?.name || 'Workspace')}</span>${close}</div>`;
     }
     const st = state.status[t.path] || {};
     const n = changedFiles(st).length;
@@ -253,7 +253,7 @@ function renderTabbar() {
       : n ? `<span class="dtab-dot changes" role="img" title="${plural(n, 'uncommitted change')}" aria-label="${plural(n, 'uncommitted change')}"></span>` : '';
     return `<div class="dtab ${active ? 'active' : ''}" draggable="true" role="tab" data-action="activate-tab" data-key="${esc(key)}" title="${esc(t.path)}">
       <span class="dtab-name">${esc(basename(t.path))}</span>
-      ${st.branch || st.detached ? `<span class="dtab-branch">${esc(st.detached ? 'detached' : st.branch)}</span>` : ''}
+      ${st.branch || st.detached ? `<span class="dtab-branch i-branch">${esc(st.detached ? 'detached' : st.branch)}</span>` : ''}
       ${mark}${close}</div>`;
   }).join('');
   markTabRows();
@@ -303,10 +303,10 @@ function renderHome() {
     <h1>Welcome to RepoDeck 👋</h1>
     <p class="lead">A calmer way to work with git — with plain-English buttons, and several repos side by side.</p>
     <div class="home-cards">
-      <div class="hcard"><h3>Already have a repo on your computer?</h3><p>Pick its folder — the one you cloned into. You can also just <b>drag the folder onto this window</b>.</p><button class="btn primary" data-action="open-repo-folder">📂 Open repo folder…</button></div>
+      <div class="hcard"><h3>Already have a repo on your computer?</h3><p>Pick its folder — the one you cloned into. You can also just <b>drag the folder onto this window</b>.</p><button class="btn primary" data-action="open-repo-folder"><span class="i i-folder" aria-hidden="true"></span>Open repo folder…</button></div>
       <div class="hcard"><h3>Need to download one?</h3><p>Clone a repo from GitHub, Azure DevOps, GitLab… using its URL.</p><button class="btn" data-action="clone">⤓ Clone a repo</button></div>
       <div class="hcard"><h3>Starting something new?</h3><p>Turn any folder into a repo, save your files as the first commit, and put it on GitHub or Azure DevOps in one go.</p><button class="btn" data-action="new-repo">＋ New repo from a folder</button></div>
-      <div class="hcard"><h3>Work on several repos together?</h3><p>A <b>workspace</b> groups repos you use together — e.g. the three repos of one project — so you can see them side by side and pull, push or branch all of them at once.</p><button class="btn" data-action="new-ws">▦ New workspace</button></div>
+      <div class="hcard"><h3>Work on several repos together?</h3><p>A <b>workspace</b> groups repos you use together — e.g. the three repos of one project — so you can see them side by side and pull, push or branch all of them at once.</p><button class="btn" data-action="new-ws"><span class="i i-grid" aria-hidden="true"></span>New workspace</button></div>
     </div>
     <p class="hint">Keep coding in VS Code or Cursor as usual — RepoDeck watches your folders and updates by itself. New to git? <a href="#" data-action="help">Git explained</a>.</p>
   </div>`;
@@ -335,7 +335,7 @@ function openWorkspace(id) {
       <button class="btn" data-action="ws-commit" title="git commit — the same commit message in several repos">✓ Commit in all…</button>
       <button class="btn" data-action="ws-prs" title="A pull request from each repo's branch, with the same title and description">⇄ Pull requests for all…</button>
       <span class="sep"></span>
-      <button class="btn" data-action="ws-new-branch" title="git switch -c — the same new branch in several repos">⎇ New branch in all…</button>
+      <button class="btn" data-action="ws-new-branch" title="git switch -c — the same new branch in several repos"><span class="i i-branch" aria-hidden="true"></span>New branch in all…</button>
       <button class="btn" data-action="ws-switch" title="git switch — move every repo to the same branch">⇄ Switch all to branch…</button>
       <button class="btn" data-action="ws-update-from" title="Bring the new commits from dev, main or any branch into every repo">⤓ Update all from…</button>
       <span class="sep"></span>
@@ -378,7 +378,7 @@ async function searchWorkspace(wsId) {
       <button class="btn small ghost" data-action="ws-search-clear">Clear</button></div>
     ${hits.map((f) => `<div class="ws-hit-repo"><h3>${esc(basename(f.repo))}</h3>
       ${f.branches.map((b) => `<button class="ws-hit" data-action="ws-hit-branch" data-repo="${esc(f.repo)}" data-name="${esc(b.name)}">
-        <span>⎇ <b>${esc(b.name)}</b></span><span class="muted small">${b.remote ? 'branch on the server' : 'branch'}</span></button>`).join('')}
+        <span><span class="i i-branch" aria-hidden="true"></span> <b>${esc(b.name)}</b></span><span class="muted small">${b.remote ? 'branch on the server' : 'branch'}</span></button>`).join('')}
       ${f.commits.map((c) => `<button class="ws-hit" data-action="ws-hit-commit" data-repo="${esc(f.repo)}" data-hash="${c.hash}" data-on="${esc(c.on || '')}">
         <span><span class="mono">${c.short}</span> ${esc(c.subject)}</span>
         <span class="muted small">${esc(c.author)} · ${timeAgo(c.date)}${c.on ? ` · on ${esc(c.on)}` : ''}</span></button>`).join('')}
@@ -453,7 +453,7 @@ function renderWorkspaceCards() {
         <div><div class="card-title">${esc(basename(p))}</div><div class="path">${esc(p)}</div></div>
         ${busyHtml(p)}
       </div>
-      <div class="card-branch">⎇ <b>${esc(st.detached ? 'detached HEAD' : st.branch || '')}</b>
+      <div class="card-branch"><span class="i i-branch" aria-hidden="true"></span> <b>${esc(st.detached ? 'detached HEAD' : st.branch || '')}</b>
         ${st.error || st.missing ? '' : `<button class="btn small ghost" data-action="branch-switcher" data-repo="${esc(p)}" title="Switch this repo to another branch">Switch…</button>`}</div>
       <div class="facts">${facts}</div>
       <div class="card-actions">

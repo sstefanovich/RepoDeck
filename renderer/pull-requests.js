@@ -82,7 +82,7 @@ async function createPrDialog(repo, info) {
           desc.value = rest.join('\n').trim();
           descTouched = true;
           ok.disabled = !title.value.trim();
-        } catch (err) { toast(err.message, 'bad'); }
+        } catch (err) { if (isClaudeAuthError(err.message)) showClaudeError("Claude couldn't write the description", err); else toast(err.message, 'bad'); }
         finally { b.disabled = false; b.textContent = '✦ Write description'; }
       });
     },

@@ -326,6 +326,30 @@ async function showError(title, err, where = null) {
   if (r.id === 'claude') askClaude(`I tried "${title.replace(/^Couldn't /i, 'to ')}" in RepoDeck and git said:\n\n${raw.slice(0, 3000)}\n\nWhat went wrong, in plain English, and how do I fix it? Look at the repo if that helps, but don't change anything yet.`);
 }
 
+// ---------- Claude errors ----------
+const CLAUDE_SIGNIN_STEPS = 'A terminal opens with Claude Code. Type <code>/login</code>, press Enter, and finish signing in in your browser. Then type <code>/exit</code> and try again here.';
+
+// For errors from the ✦ features: a login problem gets a "sign in again" dialog, anything else the usual one.
+async function showClaudeError(title, err) {
+  const raw = err?.message || String(err);
+  if (!isClaudeAuthError(raw)) return showError(title, err);
+  const r = await modal({
+    title: 'Claude needs you to sign in again',
+    body: `<p>The ✦ features use the <b>Claude Code</b> app on this computer, signed in as you, and its login has expired (or was never set up). This isn't about your GitHub or Azure DevOps token.</p>
+      <p>${CLAUDE_SIGNIN_STEPS}</p>
+      <p class="hint">Using an API key instead (the <code>ANTHROPIC_API_KEY</code> environment variable)? Then that key has expired or been revoked: replace it, or remove the variable to use your Claude login.</p>
+      <details><summary>What Claude said</summary><pre class="raw">${esc(raw)}</pre></details>`,
+    buttons: [{ id: 'cancel', label: 'Close' }, { id: 'login', label: 'Open Claude to sign in', kind: 'primary' }],
+  });
+  if (r.id === 'login') claudeLogin();
+}
+
+async function claudeLogin() {
+  const r = await api.claude.login().catch((e) => ({ ok: false, error: e.message }));
+  if (r.ok) toast('Type /login in the terminal that opened, then try again here.', 'info');
+  else showError("Couldn't open Claude Code", new Error(r.error === 'NOT_FOUND' ? "Couldn't find the Claude Code app (claude.exe). Set its location in Settings → AI assistant." : r.error));
+}
+
 // ---------- modals & toasts ----------
 function modal({ title, body = '', buttons = [{ id: 'ok', label: 'OK', kind: 'primary' }], wide = false, init }) {
   return new Promise((resolve) => {

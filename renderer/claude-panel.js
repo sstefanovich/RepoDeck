@@ -217,6 +217,11 @@ function renderClaude() {
   box.innerHTML = cl.items.map((it, idx) => {
     if (it.kind === 'user') return `<div class="cp-user">${esc(it.text)}</div>`;
     if (it.kind === 'text') return it.text.trim() ? `<div class="cp-text">${md(it.text)}</div>` : '';
+    if (it.kind === 'notice' && it.login) {
+      return `<div class="cp-notice bad"><b>Claude needs you to sign in again.</b> Its login has expired (this isn't your GitHub or Azure DevOps token). ${CLAUDE_SIGNIN_STEPS}
+        <div class="cp-notice-actions"><button class="btn small primary" data-action="claude-login">Open Claude to sign in</button></div>
+        <details><summary>What Claude said</summary><pre class="raw">${esc(it.text)}</pre></details></div>`;
+    }
     if (it.kind === 'notice') return `<div class="cp-notice ${it.level || ''}">${it.html || esc(it.text)}</div>`;
     if (it.kind === 'done') return `<div class="cp-done">✓ Done${it.durationMs ? ` · ${Math.round(it.durationMs / 1000)}s` : ''}</div>`;
     const done = !cl.running && it.status === 'running' && !it.perm;
@@ -276,7 +281,7 @@ function onClaudeEvent(ev) {
     }
     case 'result':
       chat.running = false;
-      if (ev.isError && ev.subtype !== 'error_during_execution') chat.items.push({ kind: 'notice', level: 'bad', text: ev.text || `Claude stopped (${ev.subtype}).` });
+      if (ev.isError && ev.subtype !== 'error_during_execution') chat.items.push(claudeNotice(ev.text || `Claude stopped (${ev.subtype}).`));
       else chat.items.push({ kind: 'done', durationMs: ev.durationMs });
       // Approvals still open belonged to the finished turn.
       for (const i of chat.items) if (i.perm && !i.perm.decided) i.perm.decided = 'cancelled';
@@ -285,7 +290,7 @@ function onClaudeEvent(ev) {
       break;
     case 'notice': chat.items.push({ kind: 'notice', text: ev.text }); break;
     case 'exit':
-      if (chat.running && ev.code) chat.items.push({ kind: 'notice', level: 'bad', text: `Claude stopped unexpectedly${ev.message ? `: ${ev.message}` : '.'}` });
+      if (chat.running && ev.code) chat.items.push(isClaudeAuthError(ev.message) ? claudeNotice(ev.message) : { kind: 'notice', level: 'bad', text: `Claude stopped unexpectedly${ev.message ? `: ${ev.message}` : '.'}` });
       chat.running = false;
       saveChats();
       break;
@@ -293,6 +298,9 @@ function onClaudeEvent(ev) {
   }
   if (chat === cl) renderClaudeSoon();
 }
+
+// An error notice in the chat; a login problem gets a "sign in again" button instead of the raw text.
+const claudeNotice = (text) => (isClaudeAuthError(text) ? { kind: 'notice', login: true, text } : { kind: 'notice', level: 'bad', text });
 
 async function claudeSend(text) {
   const ta = $('#cp-input');

@@ -630,8 +630,13 @@ function orphanedShelf(stashes, localNames) {
   return (stashes || []).filter((s) => s.branch && s.branch !== '(no branch)' && !/^\[discarded\]/.test(s.message) && !have.has(s.branch));
 }
 
+// Whether an error from Claude Code means its login is missing or has expired (it runs signed in as the user),
+// as opposed to any other problem. Covers the subscription login and an API key in ANTHROPIC_API_KEY.
+const CLAUDE_AUTH_RE = /please run \/login|run \/login|oauth token (has )?expired|token (has )?expired|invalid api key|not logged in|log ?in required|failed to authenticate|authentication_error|invalid (bearer|x-api-key)|api error: 401|\b401\b.*unauthori[sz]ed/i;
+const isClaudeAuthError = (text) => CLAUDE_AUTH_RE.test(String(text || ''));
+
 if (typeof module !== 'undefined') {
   module.exports = { esc, basename, norm, samePath, plural, timeAgo, parseConflicts, pickLines, myers, diffLines, sideBySide, inlineDiff, toLines, md,
     langOf, tokenize, highlight, changeRange, parseUnified, pairHunk, lineKeyer, changedLines, partialPatch, workItemFromBranch, withWorkItem, feedOutput, ansiToHtml, reflogText, prTitleFromBranch, prDraft, graphRows, fuzzyScore, moveRepo,
-    DEFAULT_BASE_BRANCHES, isBaseBranch, baseBranchNames, branchWarning, DEFAULT_BRANCH_PREFIXES, branchNameIssues, orphanedShelf };
+    DEFAULT_BASE_BRANCHES, isBaseBranch, baseBranchNames, branchWarning, DEFAULT_BRANCH_PREFIXES, branchNameIssues, orphanedShelf, isClaudeAuthError };
 }
